@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures::task::AtomicWaker;
+use atomic_waker::AtomicWaker;
 
 use crate::error::Payload;
 use crate::{JoinError, Options};

@@ -4,8 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::task::{Context, Poll, Wake, Waker};
 
-use futures::task::AtomicWaker;
-use futures::FutureExt;
+use atomic_waker::AtomicWaker;
 use slotmap::SlotMap;
 
 use crate::Options;
@@ -110,7 +109,7 @@ impl<'a> Executor<'a> {
                 let mut cx = Context::from_waker(&waker);
 
                 task.last_wake = epoch;
-                if task.future.poll_unpin(&mut cx).is_ready() {
+                if task.future.as_mut().poll(&mut cx).is_ready() {
                     self.tasks.remove(taskid);
                 }
             }

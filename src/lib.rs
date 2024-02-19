@@ -6,8 +6,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures::FutureExt;
-
 use crate::executor::Executor;
 use crate::wrapper::{TaskCommon, TaskHandle, WrapFuture};
 
@@ -94,7 +92,7 @@ impl<'a, R> Future for AsyncScope<'a, R> {
             }
         }
 
-        match self.main.poll_unpin(cx) {
+        match Pin::new(&mut self.main).poll(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(value)) => Poll::Ready(value),
             Poll::Ready(Err(e)) => match e.try_into_panic() {
@@ -128,7 +126,7 @@ impl<'a> ScopeHandle<'a> {
 
 pub struct JoinHandle<'a, T> {
     handle: Arc<TaskHandle<T>>,
-    _marker: PhantomData<&'a AsyncScope<'a, T>>,
+    _marker: PhantomData<&'a ()>,
 }
 
 impl<'a, T> JoinHandle<'a, T> {
@@ -167,4 +165,17 @@ impl AbortHandle {
     pub fn abort(&self) {
         self.0.abort()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[allow(dead_code)]
+    const fn require_send<T: Send>() {}
+
+    const _: () = {
+        require_send::<JoinHandle<()>>();
+        require_send::<AbortHandle>();
+    };
 }
