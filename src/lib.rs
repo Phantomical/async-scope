@@ -1,4 +1,28 @@
-#![warn(unsafe_op_in_unsafe_fn)]
+//! Async equivalent of [`std::thread::scope`].
+//!
+//! This crate allows you to write futures that use `spawn` but also borrow data
+//! from the current function. It does this by running those futures in a local
+//! executor within the current task.
+//! 
+//! # Example
+//! ```
+//! # #[tokio::main]
+//! # async fn main() {
+//! let data = "some data to be borrowed".to_string();
+//! 
+//! async_scope::scope!(|scope| {
+//!     // Some tasks which borrow data
+//!     let task_a = scope.spawn(async { data.clone() });
+//!     let task_b = scope.spawn(async { data.clone() });
+//! 
+//!     task_a.await.unwrap();
+//!     task_b.await.unwrap();
+//! })
+//! .await;
+//! # }
+//! ```
+
+#![deny(unsafe_code)]
 
 use std::future::Future;
 use std::marker::PhantomData;
@@ -6,8 +30,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use futures_channel::oneshot;
+
+use crate::error::Payload;
 use crate::executor::Executor;
-use crate::wrapper::{TaskCommon, TaskHandle, WrapFuture};
+use crate::wrapper::{TaskAbortHandle, WrapFuture};
 
 /// Helper macro used to silence `unused_import` warnings when an item is
 /// only imported in order to refer to it within a doc comment.
@@ -30,6 +57,17 @@ mod wrapper;
 
 pub use crate::error::JoinError;
 pub use crate::options::Options;
+
+#[macro_export]
+macro_rules! scope {
+    (|$scope:ident| $body:expr) => {
+        $crate::scope(|$scope| async {
+            let $scope = $scope;
+
+            $body
+        })
+    };
+}
 
 pub fn scope<'a, F, Fut>(func: F) -> AsyncScope<'a, Fut::Output>
 where
@@ -60,7 +98,7 @@ impl<'a, R> AsyncScope<'a, R> {
 
         Self {
             executor,
-            main: JoinHandle::new(handle),
+            main: handle,
         }
     }
 
@@ -71,11 +109,7 @@ impl<'a, R> AsyncScope<'a, R> {
     {
         let (future, handle) = WrapFuture::new(future, self.executor.options());
         self.executor.spawn(Box::pin(future));
-
-        JoinHandle {
-            handle,
-            _marker: PhantomData,
-        }
+        handle
     }
 }
 
@@ -116,23 +150,21 @@ impl<'a> ScopeHandle<'a> {
     {
         let (future, handle) = WrapFuture::new(future, self.handle.options());
         self.handle.spawn(Box::pin(future));
-
-        JoinHandle {
-            handle,
-            _marker: PhantomData,
-        }
+        handle
     }
 }
 
 pub struct JoinHandle<'a, T> {
-    handle: Arc<TaskHandle<T>>,
+    handle: Arc<TaskAbortHandle>,
+    channel: oneshot::Receiver<Result<T, Payload>>,
     _marker: PhantomData<&'a ()>,
 }
 
 impl<'a, T> JoinHandle<'a, T> {
-    fn new(handle: Arc<TaskHandle<T>>) -> Self {
+    fn new(handle: Arc<TaskAbortHandle>, channel: oneshot::Receiver<Result<T, Payload>>) -> Self {
         Self {
             handle,
+            channel,
             _marker: PhantomData,
         }
     }
@@ -142,24 +174,28 @@ impl<'a, T> JoinHandle<'a, T> {
     }
 
     pub fn abort_handle(&self) -> AbortHandle {
-        AbortHandle(self.handle.common())
+        AbortHandle(self.handle.clone())
     }
 }
 
 impl<'a, R> Future for JoinHandle<'a, R> {
     type Output = Result<R, JoinError>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // SAFETY: JoinHandle::poll is the only place we can call handle.poll.
-        //         This ensures that it is never called concurrently.
-        unsafe { self.handle.poll(cx) }
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.channel)
+            .poll(cx)
+            .map(|result| match result {
+                Ok(Ok(value)) => Ok(value),
+                Ok(Err(payload)) => Err(JoinError::panicked(payload)),
+                Err(_) => Err(JoinError::cancelled()),
+            })
     }
 }
 
 impl<'a, R> Unpin for JoinHandle<'a, R> {}
 
 #[derive(Clone)]
-pub struct AbortHandle(Arc<TaskCommon>);
+pub struct AbortHandle(Arc<TaskAbortHandle>);
 
 impl AbortHandle {
     pub fn abort(&self) {

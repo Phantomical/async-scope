@@ -32,6 +32,7 @@ pub(crate) struct Executor<'a> {
     shared: Arc<Shared>,
     tasks: SlotMap<TaskId, Task<'a>>,
 
+    peek: Option<TaskId>,
     run_queue: mpsc::Receiver<TaskId>,
     spawn_queue: mpsc::Receiver<FutureObj<'a>>,
 }
@@ -42,7 +43,7 @@ impl<'a> Executor<'a> {
         let (spawn_tx, spawn_rx) = mpsc::channel();
         let shared = Arc::new(Shared {
             waker: AtomicWaker::new(),
-            epoch: AtomicU64::new(0),
+            epoch: AtomicU64::new(1),
             queue: run_tx,
             options,
         });
@@ -52,6 +53,7 @@ impl<'a> Executor<'a> {
                 shared: shared.clone(),
                 tasks: SlotMap::new(),
 
+                peek: None,
                 run_queue: run_rx,
                 spawn_queue: spawn_rx,
             },
@@ -84,18 +86,31 @@ impl<'a> Executor<'a> {
         self.spawn_epoch(self.shared.epoch.load(Ordering::Acquire), future)
     }
 
+    fn next_task(&mut self) -> Option<TaskId> {
+        if let Some(taskid) = self.peek.take() {
+            return Some(taskid);
+        }
+
+        self.run_queue.try_recv().ok()
+    }
+
     pub fn poll(&mut self, cx: &Context<'_>) -> Poll<()> {
         self.shared.waker.register(cx.waker());
+
         let epoch = self.shared.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        let mut more_pending = true;
 
         while let Ok(future) = self.spawn_queue.try_recv() {
             self.spawn_epoch(epoch, future);
         }
 
-        loop {
-            let taskid = match self.run_queue.try_recv() {
-                Ok(taskid) => taskid,
-                Err(_) => break,
+        for _ in 0..self.shared.options.max_polls_without_yield {
+            let taskid = match self.next_task() {
+                Some(taskid) => taskid,
+                None => {
+                    more_pending = false;
+                    break;
+                }
             };
 
             let task = match self.tasks.get_mut(taskid) {
@@ -103,20 +118,39 @@ impl<'a> Executor<'a> {
                 None => continue,
             };
 
-            // Avoid waking the future twice within the same poll.
-            if task.last_wake != epoch {
-                let waker = Waker::from(task.waker.clone());
-                let mut cx = Context::from_waker(&waker);
+            // Avoid waking the same future twice within the same poll.
+            //
+            // Tokio has a feature where, after a future has done enough work, various tokio
+            // futures will start returning Pending even if they might be ready. This makes
+            // it so other futures on the executor get a chance to run.
+            //
+            // However, this all falls apart if a local executor (like Executor!) continues
+            // to poll them repeatedly. It can get even worse if you end up with multiple
+            // executors within each other because then the call repetitions multiply.
+            if task.last_wake == epoch {
+                // We still need to process this wakeup though, so save it for the next time.
+                self.peek = Some(taskid);
+                break;
+            }
 
-                task.last_wake = epoch;
-                if task.future.as_mut().poll(&mut cx).is_ready() {
-                    self.tasks.remove(taskid);
-                }
+            let waker = Waker::from(task.waker.clone());
+            let mut cx = Context::from_waker(&waker);
+
+            task.last_wake = epoch;
+            if task.future.as_mut().poll(&mut cx).is_ready() {
+                self.tasks.remove(taskid);
             }
 
             while let Ok(future) = self.spawn_queue.try_recv() {
                 self.spawn_epoch(epoch, future);
             }
+        }
+
+        // If we exited due to running out of attempts or encountering a task that was
+        // already woken this poll then we need to tell the executor to wake us back up
+        // immediately so we can keep working through the queue.
+        if more_pending {
+            cx.waker().wake_by_ref();
         }
 
         if self.tasks.is_empty() {
