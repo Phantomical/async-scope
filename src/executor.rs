@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
@@ -7,6 +8,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use atomic_waker::AtomicWaker;
 use slotmap::SlotMap;
 
+use crate::error::Payload;
 use crate::Options;
 
 type FutureObj<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -35,6 +37,8 @@ pub(crate) struct Executor<'a> {
     peek: Option<TaskId>,
     run_queue: mpsc::Receiver<TaskId>,
     spawn_queue: mpsc::Receiver<FutureObj<'a>>,
+    uncaught_panic: Option<Payload>,
+    max_polls_without_yield: u32,
 }
 
 impl<'a> Executor<'a> {
@@ -56,6 +60,8 @@ impl<'a> Executor<'a> {
                 peek: None,
                 run_queue: run_rx,
                 spawn_queue: spawn_rx,
+                uncaught_panic: None,
+                max_polls_without_yield: 32,
             },
             Handle {
                 spawn: spawn_tx,
@@ -104,7 +110,7 @@ impl<'a> Executor<'a> {
             self.spawn_epoch(epoch, future);
         }
 
-        for _ in 0..self.shared.options.max_polls_without_yield {
+        for _ in 0..self.max_polls_without_yield {
             let taskid = match self.next_task() {
                 Some(taskid) => taskid,
                 None => {
@@ -137,8 +143,18 @@ impl<'a> Executor<'a> {
             let mut cx = Context::from_waker(&waker);
 
             task.last_wake = epoch;
-            if task.future.as_mut().poll(&mut cx).is_ready() {
-                self.tasks.remove(taskid);
+            let result =
+                panic::catch_unwind(AssertUnwindSafe(|| task.future.as_mut().poll(&mut cx)));
+
+            match result {
+                Ok(Poll::Pending) => (),
+                Ok(Poll::Ready(())) => {
+                    self.tasks.remove(taskid);
+                }
+                Err(payload) => {
+                    self.tasks.remove(taskid);
+                    self.uncaught_panic = Some(payload);
+                }
             }
 
             while let Ok(future) = self.spawn_queue.try_recv() {

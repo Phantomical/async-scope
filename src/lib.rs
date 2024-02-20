@@ -3,26 +3,49 @@
 //! This crate allows you to write futures that use `spawn` but also borrow data
 //! from the current function. It does this by running those futures in a local
 //! executor within the current task.
-//! 
+//!
 //! # Example
 //! ```
 //! # #[tokio::main]
 //! # async fn main() {
-//! let data = "some data to be borrowed".to_string();
-//! 
-//! async_scope::scope!(|scope| {
-//!     // Some tasks which borrow data
-//!     let task_a = scope.spawn(async { data.clone() });
-//!     let task_b = scope.spawn(async { data.clone() });
-//! 
-//!     task_a.await.unwrap();
-//!     task_b.await.unwrap();
-//! })
-//! .await;
+//! use std::time::Duration;
+//!
+//! let mut a = vec![1, 2, 3];
+//! let mut x = 0;
+//!
+//! let scope = async_scope::scope!(|scope| {
+//!     scope.spawn(async {
+//!         // We can borrow `a` here
+//!         dbg!(&a);
+//!     });
+//!
+//!     scope.spawn(async {
+//!         // We can even mutably borrow `x` here because no other threads are
+//!         // using it.
+//!         x += a[0] + a[2];
+//!     });
+//!
+//!     let handle = scope.spawn(async {
+//!         // We can also run arbitrary futures as part of the scope tasks.
+//!         tokio::time::sleep(Duration::from_millis(50)).await;
+//!     });
+//!
+//!     // The main task can also await on futures
+//!     tokio::time::sleep(Duration::from_millis(10)).await;
+//!
+//!     // and even wait for tasks that have been spawned
+//!     handle
+//!         .await
+//!         .expect("the task panicked");
+//! });
+//!
+//! // We do need to await the scope so that it can run the tasks, though.
+//! scope.await;
 //! # }
 //! ```
 
 #![deny(unsafe_code)]
+// #![warn(missing_docs)]
 
 use std::future::Future;
 use std::marker::PhantomData;
@@ -58,10 +81,64 @@ mod wrapper;
 pub use crate::error::JoinError;
 pub use crate::options::Options;
 
+/// Create a new scope for spawning scoped tasks.
+///
+/// The function will be passed a [`ScopeHandle`] which can be used to
+/// [`spawn`]` new scoped tasks.
+///
+/// Unlike tokio's [`spawn`][tokio-spawn], scoped tasks can borrow non-`'static`
+/// data, as the scope guarantees that all tasks will be either joined or
+/// cancelled at the end of the scope.
+///
+/// All tasks that have not been manually joined will be automatically joined
+/// before the [`AsyncScope`] completes.
+///
+/// # Example
+/// ```
+/// # #[tokio::main]
+/// # async fn main() {
+/// use std::time::Duration;
+///
+/// let mut a = vec![1, 2, 3];
+/// let mut x = 0;
+///
+/// let scope = async_scope::scope!(|scope| {
+///     scope.spawn(async {
+///         // We can borrow `a` here
+///         dbg!(&a);
+///     });
+///
+///     scope.spawn(async {
+///         // We can even mutably borrow `x` here because no other threads are
+///         // using it.
+///         x += a[0] + a[2];
+///     });
+///
+///     let handle = scope.spawn(async {
+///         // We can also run arbitrary futures as part of the scope tasks.
+///         tokio::time::sleep(Duration::from_millis(50)).await;
+///     });
+///
+///     // The main task can also await on futures
+///     tokio::time::sleep(Duration::from_millis(10)).await;
+///
+///     // and even wait for tasks that have been spawned
+///     handle
+///         .await
+///         .expect("the task panicked");
+/// });
+///
+/// // We do need to await the scope so that it can run the tasks, though.
+/// scope.await;
+/// # }
+/// ```
+///
+/// [`spawn`]: ScopeHandle::spawn
+/// [tokio-spawn]: https://docs.rs/tokio/latest/tokio/task/fn.spawn.html
 #[macro_export]
 macro_rules! scope {
-    (|$scope:ident| $body:expr) => {
-        $crate::scope(|$scope| async {
+    (| $scope:ident | $body:expr) => {
+        $crate::AsyncScope::new($crate::Options::new(), |$scope| async {
             let $scope = $scope;
 
             $body
@@ -69,22 +146,17 @@ macro_rules! scope {
     };
 }
 
-pub fn scope<'a, F, Fut>(func: F) -> AsyncScope<'a, Fut::Output>
-where
-    F: FnOnce(ScopeHandle<'a>) -> Fut,
-    Fut: Future + Send + 'a,
-    Fut::Output: Send,
-{
-    AsyncScope::new(Options::default(), func)
-}
-
+/// A collection of tasks that are run together.
+///
+/// This type is returned by the [`scope`] macro. If you already have an
+/// existing async function then you can use [`AsyncScope::new`] instead.
 pub struct AsyncScope<'a, R> {
     executor: Executor<'a>,
     main: JoinHandle<'a, R>,
 }
 
 impl<'a, R> AsyncScope<'a, R> {
-    fn new<F, Fut>(options: Options, future: F) -> Self
+    pub fn new<F, Fut>(options: Options, future: F) -> Self
     where
         F: FnOnce(ScopeHandle<'a>) -> Fut,
         Fut: Future<Output = R> + Send + 'a,
@@ -93,7 +165,7 @@ impl<'a, R> AsyncScope<'a, R> {
         let (mut executor, handle) = Executor::new(options);
 
         let future = future(ScopeHandle { handle });
-        let (future, handle) = WrapFuture::new(future, executor.options());
+        let (future, handle) = WrapFuture::new(future);
         executor.spawn(Box::pin(future));
 
         Self {
@@ -107,7 +179,7 @@ impl<'a, R> AsyncScope<'a, R> {
         F: Future + Send + 'a,
         F::Output: Send,
     {
-        let (future, handle) = WrapFuture::new(future, self.executor.options());
+        let (future, handle) = WrapFuture::new(future);
         self.executor.spawn(Box::pin(future));
         handle
     }
@@ -148,7 +220,7 @@ impl<'a> ScopeHandle<'a> {
         F: Future + Send + 'a,
         F::Output: Send,
     {
-        let (future, handle) = WrapFuture::new(future, self.handle.options());
+        let (future, handle) = WrapFuture::new(future);
         self.handle.spawn(Box::pin(future));
         handle
     }

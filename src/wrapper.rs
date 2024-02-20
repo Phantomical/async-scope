@@ -21,7 +21,7 @@ use futures_channel::oneshot;
 use pin_project_lite::pin_project;
 
 use crate::error::Payload;
-use crate::{JoinHandle, Options};
+use crate::JoinHandle;
 
 type PayloadResult<F> = Result<<F as Future>::Output, Payload>;
 
@@ -35,10 +35,9 @@ pin_project! {
 }
 
 impl<F: Future> WrapFuture<F> {
-    pub fn new<'a>(future: F, options: &Options) -> (Self, JoinHandle<'a, F::Output>) {
+    pub fn new<'a>(future: F) -> (Self, JoinHandle<'a, F::Output>) {
         let abort = Arc::new(TaskAbortHandle {
             cancelled: AtomicBool::new(false),
-            rethrow: options.catch_unwind,
             waker: AtomicWaker::new(),
         });
 
@@ -73,18 +72,17 @@ impl<F: Future> Future for WrapFuture<F> {
                 this.abort.waker.register(cx.waker());
                 return Poll::Pending;
             }
-            Err(payload) if this.abort.rethrow => {
-                this.channel.take();
-                std::panic::resume_unwind(payload)
-            }
             Err(payload) => Err(payload),
         };
 
-        let tx = this.channel
+        let tx = this
+            .channel
             .take()
             .expect("future completed but channel was already used");
 
-        let _ = tx.send(result);
+        if let Err(Err(payload)) = tx.send(result) {
+            std::panic::resume_unwind(payload);
+        }
 
         Poll::Ready(())
     }
@@ -92,7 +90,6 @@ impl<F: Future> Future for WrapFuture<F> {
 
 pub(crate) struct TaskAbortHandle {
     cancelled: AtomicBool,
-    rethrow: bool,
     waker: AtomicWaker,
 }
 

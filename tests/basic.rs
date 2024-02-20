@@ -6,7 +6,7 @@ use async_scope::*;
 async fn run_a_few() {
     let text = "test".to_string();
 
-    scope(|scope| async {
+    scope!(|scope| {
         let scope = scope;
 
         let a = scope.spawn(async {
