@@ -191,10 +191,6 @@ impl<'a> Handle<'a> {
 
         self.shared.waker.wake();
     }
-
-    pub fn options(&self) -> &Options {
-        &self.shared.options
-    }
 }
 
 struct TaskWaker {
