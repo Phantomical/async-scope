@@ -128,7 +128,7 @@ pub use crate::scope::{AbortHandle, AsyncScope, JoinHandle, ScopeHandle};
 #[macro_export]
 macro_rules! scope {
     (| $scope:ident | $body:expr) => {
-        $crate::AsyncScope::new($crate::Options::new(), |$scope| async {
+        $crate::AsyncScope::new(|$scope| async {
             let $scope = $scope;
 
             $body

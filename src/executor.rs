@@ -1,15 +1,15 @@
+#![allow(dead_code)]
+
 use std::future::Future;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 use atomic_waker::AtomicWaker;
+use concurrent_queue::ConcurrentQueue;
 use slotmap::SlotMap;
-
-use crate::error::Payload;
-use crate::Options;
 
 type FutureObj<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 type TaskId = slotmap::DefaultKey;
@@ -17,8 +17,7 @@ type TaskId = slotmap::DefaultKey;
 struct Shared {
     waker: AtomicWaker,
     epoch: AtomicU64,
-    queue: mpsc::Sender<TaskId>,
-    options: Options,
+    queue: ConcurrentQueue<TaskId>,
 }
 
 struct Task<'a> {
@@ -33,49 +32,44 @@ struct Task<'a> {
 pub(crate) struct Executor<'a> {
     shared: Arc<Shared>,
     tasks: SlotMap<TaskId, Task<'a>>,
+    spawn: Arc<ConcurrentQueue<FutureObj<'a>>>,
 
     peek: Option<TaskId>,
-    run_queue: mpsc::Receiver<TaskId>,
-    spawn_queue: mpsc::Receiver<FutureObj<'a>>,
-    uncaught_panic: Option<Payload>,
     max_polls_without_yield: u32,
 }
 
 impl<'a> Executor<'a> {
-    pub fn new(options: Options) -> (Self, Handle<'a>) {
-        let (run_tx, run_rx) = mpsc::channel();
-        let (spawn_tx, spawn_rx) = mpsc::channel();
+    pub fn new() -> Self {
         let shared = Arc::new(Shared {
             waker: AtomicWaker::new(),
             epoch: AtomicU64::new(1),
-            queue: run_tx,
-            options,
+            queue: ConcurrentQueue::unbounded(),
         });
+        let spawn = Arc::new(ConcurrentQueue::unbounded());
 
-        (
-            Self {
-                shared: shared.clone(),
-                tasks: SlotMap::new(),
+        Self {
+            shared,
+            tasks: SlotMap::new(),
+            spawn,
 
-                peek: None,
-                run_queue: run_rx,
-                spawn_queue: spawn_rx,
-                uncaught_panic: None,
-                max_polls_without_yield: 32,
-            },
-            Handle {
-                spawn: spawn_tx,
-                shared,
-            },
-        )
+            peek: None,
+            max_polls_without_yield: 32,
+        }
     }
 
-    pub fn options(&self) -> &Options {
-        &self.shared.options
+    pub fn handle(&self) -> Handle<'a> {
+        Handle {
+            shared: self.shared.clone(),
+            spawn: self.spawn.clone(),
+        }
     }
 
-    fn spawn_epoch(&mut self, epoch: u64, future: FutureObj<'a>) {
-        let taskid = self.tasks.insert_with_key(|key| Task {
+    pub fn max_polls_without_yield(&mut self, value: u32) {
+        self.max_polls_without_yield = value;
+    }
+
+    fn spawn_epoch(&mut self, epoch: u64, future: FutureObj<'a>) -> TaskId {
+        self.tasks.insert_with_key(|key| Task {
             waker: Arc::new(TaskWaker {
                 epoch: AtomicU64::new(epoch),
                 task: key,
@@ -83,35 +77,39 @@ impl<'a> Executor<'a> {
             }),
             future,
             last_wake: 0,
-        });
-
-        let _ = self.shared.queue.send(taskid);
+        })
     }
 
     pub fn spawn(&mut self, future: FutureObj<'a>) {
-        self.spawn_epoch(self.shared.epoch.load(Ordering::Acquire), future)
+        let taskid = self.spawn_epoch(self.shared.epoch.load(Ordering::Acquire), future);
+        let _ = self.shared.queue.push(taskid);
     }
 
-    fn next_task(&mut self) -> Option<TaskId> {
+    fn next_task(&mut self, epoch: u64) -> Option<TaskId> {
+        // Make sure to take the saved task before doing anything else.
         if let Some(taskid) = self.peek.take() {
             return Some(taskid);
         }
 
-        self.run_queue.try_recv().ok()
+        // TODO: This could lead to starvation when there are lots of new tasks
+        //       being added to the executor. This is probably not an issue
+        //       under normal use though.
+        if let Ok(task) = self.spawn.pop() {
+            return Some(self.spawn_epoch(epoch, task));
+        }
+
+        self.shared.queue.pop().ok()
     }
 
+    /// Poll all the tasks that have been added to the
     pub fn poll(&mut self, cx: &Context<'_>) -> Poll<()> {
         self.shared.waker.register(cx.waker());
 
         let epoch = self.shared.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         let mut more_pending = true;
 
-        while let Ok(future) = self.spawn_queue.try_recv() {
-            self.spawn_epoch(epoch, future);
-        }
-
         for _ in 0..self.max_polls_without_yield {
-            let taskid = match self.next_task() {
+            let taskid = match self.next_task(epoch) {
                 Some(taskid) => taskid,
                 None => {
                     more_pending = false;
@@ -153,12 +151,8 @@ impl<'a> Executor<'a> {
                 }
                 Err(payload) => {
                     self.tasks.remove(taskid);
-                    self.uncaught_panic = Some(payload);
+                    std::panic::resume_unwind(payload);
                 }
-            }
-
-            while let Ok(future) = self.spawn_queue.try_recv() {
-                self.spawn_epoch(epoch, future);
             }
         }
 
@@ -177,15 +171,28 @@ impl<'a> Executor<'a> {
     }
 }
 
+impl<'a> Drop for Executor<'a> {
+    fn drop(&mut self) {
+        // Prevent spawns and wakeups from accumulating
+        self.spawn.close();
+        self.shared.queue.close();
+    }
+}
+
+/// A handle to the executor that allows spawning new tasks onto the executor.
 #[derive(Clone)]
 pub(crate) struct Handle<'a> {
-    spawn: mpsc::Sender<FutureObj<'a>>,
+    spawn: Arc<ConcurrentQueue<FutureObj<'a>>>,
     shared: Arc<Shared>,
 }
 
 impl<'a> Handle<'a> {
+    /// Spawn a new future onto the [`Executor`] for this handle.
+    ///
+    /// # Panics
+    /// Panics if the executor has already been dropped.
     pub fn spawn(&self, future: FutureObj<'a>) {
-        if self.spawn.send(future).is_err() {
+        if self.spawn.push(future).is_err() {
             panic!("attempted to spawn a future on a dead AsyncScope")
         }
 
@@ -214,7 +221,7 @@ impl Wake for TaskWaker {
             return;
         }
 
-        let _ = self.shared.queue.send(self.task);
+        let _ = self.shared.queue.push(self.task);
 
         // Prevent future wake calls from doing anything until the next time the scope
         // polls its tasks.

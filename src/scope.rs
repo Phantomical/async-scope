@@ -9,33 +9,35 @@ use futures_channel::oneshot;
 use crate::error::Payload;
 use crate::executor::{self, Executor};
 use crate::wrapper::{TaskAbortHandle, WrapFuture};
-use crate::{JoinError, Options};
+use crate::JoinError;
 
 /// A collection of tasks that are run together.
 ///
 /// This type is returned by the [`scope`] macro. If you already have an
 /// existing async function then you can use [`AsyncScope::new`] instead.
-pub struct AsyncScope<'a, R> {
+pub struct AsyncScope<'a, T> {
     executor: Executor<'a>,
-    main: JoinHandle<'a, R>,
+    main: JoinHandle<'a, T>,
+    cancel_remaining_tasks_on_exit: bool,
 }
 
-impl<'a, R> AsyncScope<'a, R> {
-    pub fn new<F, Fut>(options: Options, future: F) -> Self
+impl<'a, T> AsyncScope<'a, T> {
+    pub fn new<F, Fut>(func: F) -> Self
     where
         F: FnOnce(ScopeHandle<'a>) -> Fut,
-        Fut: Future<Output = R> + Send + 'a,
-        R: Send + 'a,
+        Fut: Future<Output = T> + Send + 'a,
+        T: Send + 'a,
     {
-        let (mut executor, handle) = Executor::new(options);
-
-        let future = future(ScopeHandle { handle });
+        let mut executor = Executor::new();
+        let future = func(ScopeHandle::new(executor.handle()));
         let (future, handle) = WrapFuture::new(future);
+
         executor.spawn(Box::pin(future));
 
         Self {
             executor,
             main: handle,
+            cancel_remaining_tasks_on_exit: false,
         }
     }
 
@@ -54,13 +56,9 @@ impl<'a, R> Future for AsyncScope<'a, R> {
     type Output = R;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let poll = self.executor.poll(cx);
-        let options = self.executor.options();
-
-        if !options.cancel_remaining_tasks_on_exit {
-            if poll.is_pending() {
-                return Poll::Pending;
-            }
+        match self.executor.poll(cx) {
+            Poll::Pending if !self.cancel_remaining_tasks_on_exit => return Poll::Pending,
+            _ => (),
         }
 
         match Pin::new(&mut self.main).poll(cx) {
@@ -80,6 +78,10 @@ pub struct ScopeHandle<'a> {
 }
 
 impl<'a> ScopeHandle<'a> {
+    fn new(handle: executor::Handle<'a>) -> Self {
+        Self { handle }
+    }
+
     pub fn spawn<F>(&self, future: F) -> JoinHandle<'a, F::Output>
     where
         F: Future + Send + 'a,
@@ -98,7 +100,10 @@ pub struct JoinHandle<'a, T> {
 }
 
 impl<'a, T> JoinHandle<'a, T> {
-    pub(crate) fn new(handle: Arc<TaskAbortHandle>, channel: oneshot::Receiver<Result<T, Payload>>) -> Self {
+    pub(crate) fn new(
+        handle: Arc<TaskAbortHandle>,
+        channel: oneshot::Receiver<Result<T, Payload>>,
+    ) -> Self {
         Self {
             handle,
             channel,

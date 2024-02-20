@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 atomic-waker = "1.1.2"
+concurrent-queue = "2.4.0"
+crossbeam-deque = "0.8.5"
 futures-channel = "0.3.30"
 pin-project-lite = "0.2.13"
 slotmap = "1.0.7"
