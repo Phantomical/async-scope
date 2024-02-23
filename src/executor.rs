@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
@@ -18,6 +18,7 @@ struct Shared {
     waker: AtomicWaker,
     epoch: AtomicU64,
     queue: ConcurrentQueue<TaskId>,
+    unhandled_panic: AtomicBool,
 }
 
 struct Task<'a> {
@@ -36,6 +37,7 @@ pub(crate) struct Executor<'a> {
 
     peek: Option<TaskId>,
     max_polls_without_yield: u32,
+    unhandled_panic: bool,
 }
 
 impl<'a> Executor<'a> {
@@ -44,6 +46,7 @@ impl<'a> Executor<'a> {
             waker: AtomicWaker::new(),
             epoch: AtomicU64::new(1),
             queue: ConcurrentQueue::unbounded(),
+            unhandled_panic: AtomicBool::new(false),
         });
         let spawn = Arc::new(ConcurrentQueue::unbounded());
 
@@ -54,6 +57,7 @@ impl<'a> Executor<'a> {
 
             peek: None,
             max_polls_without_yield: 32,
+            unhandled_panic: false,
         }
     }
 
@@ -64,8 +68,18 @@ impl<'a> Executor<'a> {
         }
     }
 
+    /// Set the maximum number of times we can poll subtasks before we
+    /// unconditionally yield to the executor.
     pub fn max_polls_without_yield(&mut self, value: u32) {
         self.max_polls_without_yield = value;
+    }
+
+    pub fn unhandled_panic(&self) -> bool {
+        self.unhandled_panic || self.shared.unhandled_panic.load(Ordering::Relaxed)
+    }
+
+    pub fn unhandled_panic_flag(&self) -> UnhandledPanicFlag {
+        UnhandledPanicFlag(self.shared.clone())
     }
 
     fn spawn_epoch(&mut self, epoch: u64, future: FutureObj<'a>) -> TaskId {
@@ -149,9 +163,9 @@ impl<'a> Executor<'a> {
                 Ok(Poll::Ready(())) => {
                     self.tasks.remove(taskid);
                 }
-                Err(payload) => {
+                Err(_payload) => {
                     self.tasks.remove(taskid);
-                    std::panic::resume_unwind(payload);
+                    self.unhandled_panic = true;
                 }
             }
         }
@@ -168,6 +182,16 @@ impl<'a> Executor<'a> {
         } else {
             Poll::Pending
         }
+    }
+
+    pub fn clear(&mut self) {
+        // Prevent spawns and wakeups from accumulating
+        self.spawn.close();
+        self.shared.queue.close();
+
+        // Drain and delete all existing tasks
+        self.tasks.clear();
+        while let Ok(_) = self.spawn.pop() {}
     }
 }
 
@@ -197,6 +221,18 @@ impl<'a> Handle<'a> {
         }
 
         self.shared.waker.wake();
+    }
+
+    pub fn unhandled_panic_flag(&self) -> UnhandledPanicFlag {
+        UnhandledPanicFlag(self.shared.clone())
+    }
+}
+
+pub(crate) struct UnhandledPanicFlag(Arc<Shared>);
+
+impl UnhandledPanicFlag {
+    pub fn mark_unhandled_panic(&self) {
+        self.0.unhandled_panic.store(true, Ordering::Relaxed);
     }
 }
 

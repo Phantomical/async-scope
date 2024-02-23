@@ -21,6 +21,7 @@ use futures_channel::oneshot;
 use pin_project_lite::pin_project;
 
 use crate::error::Payload;
+use crate::executor::UnhandledPanicFlag;
 use crate::JoinHandle;
 
 type PayloadResult<F> = Result<<F as Future>::Output, Payload>;
@@ -35,10 +36,14 @@ pin_project! {
 }
 
 impl<F: Future> WrapFuture<F> {
-    pub fn new<'a>(future: F) -> (Self, JoinHandle<'a, F::Output>) {
+    pub fn new<'a>(
+        future: F,
+        unhandled_panic: UnhandledPanicFlag,
+    ) -> (Self, JoinHandle<'a, F::Output>) {
         let abort = Arc::new(TaskAbortHandle {
             cancelled: AtomicBool::new(false),
             waker: AtomicWaker::new(),
+            unhandled_panic,
         });
 
         let (tx, rx) = oneshot::channel();
@@ -91,11 +96,16 @@ impl<F: Future> Future for WrapFuture<F> {
 pub(crate) struct TaskAbortHandle {
     cancelled: AtomicBool,
     waker: AtomicWaker,
+    unhandled_panic: UnhandledPanicFlag,
 }
 
 impl TaskAbortHandle {
     pub fn abort(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
         self.waker.wake();
+    }
+
+    pub fn mark_unhandled_panic(&self) {
+        self.unhandled_panic.mark_unhandled_panic();
     }
 }
