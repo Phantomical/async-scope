@@ -62,13 +62,11 @@ macro_rules! used_in_docs {
 
 mod error;
 mod executor;
-mod options;
 mod scope;
 mod util;
 mod wrapper;
 
 pub use crate::error::JoinError;
-pub use crate::options::Options;
 pub use crate::scope::{AbortHandle, AsyncScope, JoinHandle, ScopeHandle};
 
 /// Create a new scope for spawning scoped tasks.

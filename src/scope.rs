@@ -15,7 +15,7 @@ used_in_docs!(scope);
 
 /// A collection of tasks that are run together.
 ///
-/// This type is returned by the [`scope`] macro. If you already have an
+/// This type is returned by the [`scope!`] macro. If you already have an
 /// existing async function then you can use [`AsyncScope::new`] instead.
 pub struct AsyncScope<'a, T> {
     executor: Executor<'a>,
