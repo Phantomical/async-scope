@@ -125,7 +125,7 @@ pub use crate::scope::{AbortHandle, AsyncScope, JoinHandle, ScopeHandle};
 /// [tokio-spawn]: https://docs.rs/tokio/latest/tokio/task/fn.spawn.html
 #[macro_export]
 macro_rules! scope {
-    (| $scope:ident | $body:expr) => {
+    (|$scope:ident| $body:expr) => {
         $crate::AsyncScope::new(|$scope| async {
             let $scope = $scope;
 
