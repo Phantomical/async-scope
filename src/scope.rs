@@ -62,25 +62,6 @@ impl<'a, T> AsyncScope<'a, T> {
     pub fn cancel_remaining_tasks_on_exit(&mut self, enabled: bool) {
         self.cancel_remaining_tasks_on_exit = enabled;
     }
-
-    /// Set the maximum number of futures that can be polled before yielding to
-    /// the parent executor.
-    ///
-    /// If many tasks are scheduled at once then it would be possible for
-    /// [`AsyncScope::poll`] to block for a significant amount of time, which
-    /// would cause problems for other tasks running on the executor. To avoid
-    /// this, we yield unconditionally to the executor after having polled a
-    /// number of tasks. This allows for other tasks to make progress and the
-    /// executor will return to this one once it has worked through its queue.
-    ///
-    /// The default value is 32.
-    ///
-    /// # Panics
-    /// Panics if `value` is 0.
-    pub fn max_polls_without_yield(&mut self, value: u32) {
-        assert_ne!(value, 0);
-        self.executor.max_polls_without_yield(value);
-    }
 }
 
 impl<'a, R> Future for AsyncScope<'a, R> {

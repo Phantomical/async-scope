@@ -1,6 +1,8 @@
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use async_scope::*;
+use futures::FutureExt;
 
 #[tokio::test]
 async fn run_a_few() {
@@ -94,4 +96,49 @@ async fn spawn_many() {
     tokio::time::timeout(Duration::from_millis(40), scope)
         .await
         .expect("AsyncScope took too long to run");
+}
+
+#[tokio::test]
+async fn spawn_many_immediate() {
+    let scope = scope!(|scope| for _ in 0..1024 {
+        scope.spawn(async {});
+    });
+
+    scope.await;
+}
+
+#[tokio::test]
+async fn spawn_and_cancel() {
+    let scope = scope!(|scope| {
+        let handle = scope.spawn(async { tokio::time::sleep(Duration::from_millis(100)).await });
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        handle.abort();
+        let result = handle
+            .await
+            .expect_err("cancelled future completed successfully?");
+
+        assert!(result.is_cancelled());
+    });
+
+    scope.await;
+}
+
+#[tokio::test]
+async fn unhandled_panic_in_subtask() {
+    let mut main_task_completed = false;
+    let scope = scope!(|scope| {
+        scope.spawn(async {
+            panic!();
+        });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        main_task_completed = true;
+    });
+
+    let result = AssertUnwindSafe(scope).catch_unwind().await;
+
+    assert!(result.is_err());
+    assert!(main_task_completed);
 }

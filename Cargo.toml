@@ -7,8 +7,9 @@ edition = "2021"
 atomic-waker = "1.1.2"
 concurrent-queue = "2.4.0"
 futures-channel = "0.3.30"
+futures-util = { version = "0.3.30", default-features = false, features = ["std"] }
 pin-project-lite = "0.2.13"
-slotmap = "1.0.7"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
+futures = "0.3.30"
