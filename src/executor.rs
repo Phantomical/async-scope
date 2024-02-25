@@ -1,14 +1,15 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 
-use atomic_waker::AtomicWaker;
 use concurrent_queue::ConcurrentQueue;
 use futures_util::stream::futures_unordered::FuturesUnordered;
+use futures_util::task::AtomicWaker;
 use futures_util::StreamExt;
 
 use crate::error::Payload;
+use crate::util::split_arc::{Full, Partial};
 
 type FutureObj<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
@@ -19,25 +20,25 @@ struct Shared {
 
 pub(crate) struct Executor<'a> {
     exec: FuturesUnordered<FutureObj<'a>>,
-    shared: Arc<Shared>,
-    spawn: Arc<ConcurrentQueue<FutureObj<'a>>>,
+    shared: Full<Shared, ConcurrentQueue<FutureObj<'a>>>,
 }
 
 impl<'a> Executor<'a> {
     pub fn new() -> Self {
         Self {
-            shared: Arc::new(Shared {
-                waker: AtomicWaker::new(),
-                unhandled_panic: Mutex::new(None),
-            }),
-            spawn: Arc::new(ConcurrentQueue::unbounded()),
+            shared: Full::new(
+                Shared {
+                    waker: AtomicWaker::new(),
+                    unhandled_panic: Mutex::new(None),
+                },
+                ConcurrentQueue::unbounded(),
+            ),
             exec: FuturesUnordered::new(),
         }
     }
 
     pub fn handle(&self) -> Handle<'a> {
         Handle {
-            spawn: self.spawn.clone(),
             shared: self.shared.clone(),
         }
     }
@@ -53,7 +54,7 @@ impl<'a> Executor<'a> {
     }
 
     pub fn unhandled_panic_flag(&self) -> UnhandledPanicFlag {
-        UnhandledPanicFlag(self.shared.clone())
+        UnhandledPanicFlag(Full::downgrade(&self.shared))
     }
 
     pub fn spawn(&mut self, future: FutureObj<'a>) {
@@ -62,8 +63,9 @@ impl<'a> Executor<'a> {
 
     fn spawn_all(&mut self) -> usize {
         let mut count = 0;
+        let spawn = Full::value(&self.shared);
 
-        while let Ok(future) = self.spawn.pop() {
+        while let Ok(future) = spawn.pop() {
             self.exec.push(future);
             count += 1;
         }
@@ -102,15 +104,16 @@ impl<'a> Executor<'a> {
 
 impl<'a> Drop for Executor<'a> {
     fn drop(&mut self) {
+        let spawn = Full::value(&self.shared);
+
         // Prevent spawns and wakeups from accumulating
-        self.spawn.close();
+        spawn.close();
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct Handle<'a> {
-    spawn: Arc<ConcurrentQueue<FutureObj<'a>>>,
-    shared: Arc<Shared>,
+    shared: Full<Shared, ConcurrentQueue<FutureObj<'a>>>,
 }
 
 impl<'a> Handle<'a> {
@@ -119,7 +122,8 @@ impl<'a> Handle<'a> {
     /// # Panics
     /// Panics if the executor has already been dropped.
     pub fn spawn(&self, future: FutureObj<'a>) {
-        if self.spawn.push(future).is_err() {
+        let spawn = Full::value(&self.shared);
+        if spawn.push(future).is_err() {
             panic!("attempted to spawn a future on a dead AsyncScope")
         }
 
@@ -127,11 +131,11 @@ impl<'a> Handle<'a> {
     }
 
     pub fn unhandled_panic_flag(&self) -> UnhandledPanicFlag {
-        UnhandledPanicFlag(self.shared.clone())
+        UnhandledPanicFlag(Full::downgrade(&self.shared))
     }
 }
 
-pub(crate) struct UnhandledPanicFlag(Arc<Shared>);
+pub(crate) struct UnhandledPanicFlag(Partial<Shared>);
 
 impl UnhandledPanicFlag {
     pub fn mark_unhandled_panic(&self, payload: Payload) {

@@ -3,7 +3,7 @@ use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::{Context, Poll};
 
-use atomic_waker::AtomicWaker;
+use futures_util::task::AtomicWaker;
 
 /// Initial state. In this state:
 /// - A store may start by transitioning into LOCKED

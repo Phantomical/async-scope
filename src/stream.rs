@@ -35,7 +35,7 @@
 //!
 //! By using the combinators in [`ScopedStreamExt`] the futures are polled by
 //! the scope itself and so they can run concurrently with the loop itself.
-//! 
+//!
 //! # Examples
 //! TODO
 //!

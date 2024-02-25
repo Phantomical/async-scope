@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
-use atomic_waker::AtomicWaker;
+use futures_util::task::AtomicWaker;
 use pin_project_lite::pin_project;
 
 use crate::error::Payload;
