@@ -1,13 +1,12 @@
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
-
-use futures_channel::oneshot;
 
 use crate::error::Payload;
 use crate::executor::{self, Executor};
+use crate::util::split_arc::{Full, Partial};
+use crate::util::OneshotCell;
 use crate::wrapper::{TaskAbortHandle, WrapFuture};
 use crate::{scope, JoinError};
 
@@ -75,10 +74,10 @@ impl<'a, R> Future for AsyncScope<'a, R> {
 
         match Pin::new(&mut self.main).poll(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok(_)) if self.executor.unhandled_panic() => {
-                panic!("a scoped task panicked")
-            }
-            Poll::Ready(Ok(value)) => Poll::Ready(value),
+            Poll::Ready(Ok(value)) => match self.executor.unhandled_panic() {
+                Some(payload) => std::panic::resume_unwind(payload),
+                None => Poll::Ready(value),
+            },
             Poll::Ready(Err(e)) => match e.try_into_panic() {
                 Ok(payload) => std::panic::resume_unwind(payload),
                 Err(_) => unreachable!("main async scope task was cancelled"),
@@ -139,19 +138,14 @@ impl<'a> ScopeHandle<'a> {
 /// `JoinHandle` started running immediately once you called `spawn`, even if
 /// the [`JoinHandle`] has not been awaited yet.
 pub struct JoinHandle<'a, T> {
-    handle: Arc<TaskAbortHandle>,
-    channel: oneshot::Receiver<Result<T, Payload>>,
+    handle: Full<TaskAbortHandle, OneshotCell<Result<T, Payload>>>,
     _marker: PhantomData<&'a ()>,
 }
 
 impl<'a, T> JoinHandle<'a, T> {
-    pub(crate) fn new(
-        handle: Arc<TaskAbortHandle>,
-        channel: oneshot::Receiver<Result<T, Payload>>,
-    ) -> Self {
+    pub(crate) fn new(handle: Full<TaskAbortHandle, OneshotCell<Result<T, Payload>>>) -> Self {
         Self {
             handle,
-            channel,
             _marker: PhantomData,
         }
     }
@@ -172,20 +166,25 @@ impl<'a, T> JoinHandle<'a, T> {
 
     /// Get an [`AbortHandle`] for this task.
     pub fn abort_handle(&self) -> AbortHandle {
-        AbortHandle(self.handle.clone())
+        AbortHandle(Full::downgrade(&self.handle))
+    }
+
+    /// Whether the task has exited.
+    pub fn is_finished(&self) -> bool {
+        Full::value(&self.handle).is_complete()
     }
 }
 
 impl<'a, T> Future for JoinHandle<'a, T> {
     type Output = Result<T, JoinError>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.channel)
-            .poll(cx)
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Full::value(&self.handle)
+            .poll_take(cx)
             .map(|result| match result {
-                Ok(Ok(value)) => Ok(value),
-                Ok(Err(payload)) => Err(JoinError::panicked(payload)),
-                Err(_) => Err(JoinError::cancelled()),
+                Some(Ok(value)) => Ok(value),
+                Some(Err(payload)) => Err(JoinError::panicked(payload)),
+                None => Err(JoinError::cancelled()),
             })
     }
 }
@@ -194,8 +193,11 @@ impl<'a, T> Unpin for JoinHandle<'a, T> {}
 
 impl<'a, T> Drop for JoinHandle<'a, T> {
     fn drop(&mut self) {
-        if let Ok(Some(Err(_payload))) = self.channel.try_recv() {
-            self.handle.mark_unhandled_panic();
+        let cell = Full::value(&self.handle);
+        cell.close();
+
+        if let Ok(Err(payload)) = cell.take() {
+            self.handle.mark_unhandled_panic(payload);
         }
     }
 }
@@ -206,7 +208,7 @@ impl<'a, T> Drop for JoinHandle<'a, T> {
 /// Unlike a [`JoinHandle`], an `AbortHandle` does not allow you to await the
 /// task's completion, only to abort it.
 #[derive(Clone)]
-pub struct AbortHandle(Arc<TaskAbortHandle>);
+pub struct AbortHandle(Partial<TaskAbortHandle>);
 
 impl AbortHandle {
     /// Abort the task associated with the handle.

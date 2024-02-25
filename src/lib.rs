@@ -27,8 +27,6 @@
 //! scope, you can cancel individual spawned tasks by calling
 //! [`JoinHandle::abort`].
 
-#![deny(unsafe_code)]
-
 /// Helper macro used to silence `unused_import` warnings when an item is
 /// only imported in order to refer to it within a doc comment.
 macro_rules! used_in_docs {

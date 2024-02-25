@@ -1,7 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use atomic_waker::AtomicWaker;
@@ -9,11 +8,13 @@ use concurrent_queue::ConcurrentQueue;
 use futures_util::stream::futures_unordered::FuturesUnordered;
 use futures_util::StreamExt;
 
+use crate::error::Payload;
+
 type FutureObj<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
 struct Shared {
     waker: AtomicWaker,
-    unhandled_panic: AtomicBool,
+    unhandled_panic: Mutex<Option<Payload>>,
 }
 
 pub(crate) struct Executor<'a> {
@@ -27,7 +28,7 @@ impl<'a> Executor<'a> {
         Self {
             shared: Arc::new(Shared {
                 waker: AtomicWaker::new(),
-                unhandled_panic: AtomicBool::new(false),
+                unhandled_panic: Mutex::new(None),
             }),
             spawn: Arc::new(ConcurrentQueue::unbounded()),
             exec: FuturesUnordered::new(),
@@ -41,8 +42,14 @@ impl<'a> Executor<'a> {
         }
     }
 
-    pub fn unhandled_panic(&self) -> bool {
-        self.shared.unhandled_panic.load(Ordering::Relaxed)
+    pub fn unhandled_panic(&self) -> Option<Payload> {
+        let mut panic = self
+            .shared
+            .unhandled_panic
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        panic.take()
     }
 
     pub fn unhandled_panic_flag(&self) -> UnhandledPanicFlag {
@@ -127,7 +134,15 @@ impl<'a> Handle<'a> {
 pub(crate) struct UnhandledPanicFlag(Arc<Shared>);
 
 impl UnhandledPanicFlag {
-    pub fn mark_unhandled_panic(&self) {
-        self.0.unhandled_panic.store(true, Ordering::Relaxed);
+    pub fn mark_unhandled_panic(&self, payload: Payload) {
+        let mut panic = self
+            .0
+            .unhandled_panic
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        if panic.is_none() {
+            *panic = Some(payload);
+        }
     }
 }
