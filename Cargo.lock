@@ -23,6 +23,7 @@ version = "0.1.0"
 dependencies = [
  "concurrent-queue",
  "futures",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "pin-project-lite",
