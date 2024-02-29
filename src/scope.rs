@@ -5,8 +5,9 @@ use std::task::{Context, Poll};
 
 use crate::error::Payload;
 use crate::executor::{self, Executor};
+use crate::util::complete::RequirePending;
 use crate::util::split_arc::{Full, Partial};
-use crate::util::OneshotCell;
+use crate::util::{tracing, OneshotCell};
 use crate::wrapper::{TaskAbortHandle, WrapFuture};
 use crate::{scope, JoinError};
 
@@ -140,12 +141,17 @@ impl<'a> ScopeHandle<'a> {
 pub struct JoinHandle<'a, T> {
     handle: Full<TaskAbortHandle, OneshotCell<Result<T, Payload>>>,
     _marker: PhantomData<&'a ()>,
+
+    /// In debug mode we check to ensure that we aren't polled once the future
+    /// is complete.
+    check: RequirePending,
 }
 
 impl<'a, T> JoinHandle<'a, T> {
     pub(crate) fn new(handle: Full<TaskAbortHandle, OneshotCell<Result<T, Payload>>>) -> Self {
         Self {
             handle,
+            check: RequirePending::new(),
             _marker: PhantomData,
         }
     }
@@ -178,14 +184,29 @@ impl<'a, T> JoinHandle<'a, T> {
 impl<'a, T> Future for JoinHandle<'a, T> {
     type Output = Result<T, JoinError>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Full::value(&self.handle)
-            .poll_take(cx)
-            .map(|result| match result {
-                Some(Ok(value)) => Ok(value),
-                Some(Err(payload)) => Err(JoinError::panicked(payload)),
-                None => Err(JoinError::cancelled()),
-            })
+    #[allow(unused_variables)]
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let handle = &*self.handle as *const TaskAbortHandle;
+        tracing::trace!(handle = ?handle, "polling JoinHandle");
+
+        debug_assert!(
+            !self.check.is_ready(),
+            "polled a JoinHandle that had already completed"
+        );
+
+        let result = match Full::value(&self.handle).poll_take(cx) {
+            Poll::Ready(result) => result,
+            Poll::Pending => return Poll::Pending,
+        };
+
+        tracing::trace!(handle = ?handle, "JoinHandle complete");
+        self.check.set_ready();
+
+        Poll::Ready(match result {
+            Some(Ok(value)) => Ok(value),
+            Some(Err(payload)) => Err(JoinError::panicked(payload)),
+            None => Err(JoinError::cancelled()),
+        })
     }
 }
 

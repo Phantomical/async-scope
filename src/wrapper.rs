@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use futures_util::task::AtomicWaker;
@@ -10,14 +10,17 @@ use pin_project_lite::pin_project;
 use crate::error::Payload;
 use crate::executor::UnhandledPanicFlag;
 use crate::util::split_arc::Full;
-use crate::util::OneshotCell;
+use crate::util::{tracing, OneshotCell};
 use crate::JoinHandle;
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
 pin_project! {
     pub(crate) struct WrapFuture<F: Future> {
         #[pin]
         future: F,
         shared: Full<TaskAbortHandle, OneshotCell<Result<F::Output, Payload>>>,
+        id: u64,
     }
 }
 
@@ -35,10 +38,15 @@ impl<F: Future> WrapFuture<F> {
             OneshotCell::new(),
         );
 
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
+        tracing::trace!(id, "creating scoped future");
+
         (
             Self {
                 future,
                 shared: abort.clone(),
+                id,
             },
             JoinHandle::new(abort),
         )
@@ -57,13 +65,19 @@ impl<F: Future> Future for WrapFuture<F> {
         let cancelled = this.shared.cancelled.load(Ordering::Relaxed);
         let cell = Full::value(shared);
 
+        tracing::trace!(id = this.id, "polling scoped future");
+
         if cancelled {
             cell.close();
+            tracing::trace!(id = this.id, "future was cancelled");
             return Poll::Ready(());
         }
 
         let result = match catch_unwind(AssertUnwindSafe(|| this.future.poll(cx))) {
-            Ok(Poll::Ready(value)) => Ok(value),
+            Ok(Poll::Ready(value)) => {
+                tracing::trace!(id = this.id, "scoped future completed");
+                Ok(value)
+            }
             Ok(Poll::Pending) => return Poll::Pending,
             Err(payload) => Err(payload),
         };

@@ -85,11 +85,17 @@ where
         };
 
         match handle.poll(cx) {
-            Poll::Ready(Ok(value)) => Poll::Ready(Some(value)),
-            Poll::Ready(Err(error)) => match error.try_into_panic() {
-                Ok(payload) => std::panic::resume_unwind(payload),
-                Err(_) => panic!("a task within the buffer was cancelled"),
-            },
+            Poll::Ready(result) => {
+                this.queue.pop_front();
+
+                match result {
+                    Ok(value) => Poll::Ready(Some(value)),
+                    Err(error) => match error.try_into_panic() {
+                        Ok(payload) => std::panic::resume_unwind(payload),
+                        Err(_) => panic!("a task within the buffer was cancelled"),
+                    },
+                }
+            }
             Poll::Pending => Poll::Pending,
         }
     }
@@ -113,5 +119,42 @@ where
 {
     fn is_terminated(&self) -> bool {
         self.scope.is_none() && self.queue.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::pin::pin;
+
+    use futures::channel::oneshot;
+    use futures::stream;
+    use futures_util::StreamExt;
+
+    use crate::scope;
+    use crate::stream::ScopedStreamExt;
+    use crate::util::test::resolve;
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn out_of_order() {
+        let scope = scope!(|scope| {
+            let (tx1, rx1) = oneshot::channel();
+            let (tx2, rx2) = oneshot::channel();
+
+            let mut stream = pin!(stream::iter(vec![rx1, rx2]).scope_buffered(2, &scope));
+
+            tx2.send(1).unwrap();
+
+            // The second future has resolved but that shouldn't result in the stream
+            // returning a value.
+            assert_eq!(resolve(stream.next()).await, None);
+
+            tx1.send(2).unwrap();
+
+            assert_eq!(resolve(stream.next()).await, Some(Some(Ok(2))));
+            assert_eq!(resolve(stream.next()).await, Some(Some(Ok(1))));
+        });
+
+        scope.await;
     }
 }

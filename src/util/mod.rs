@@ -4,8 +4,12 @@
 //! instead used as internal helpers.
 
 pub mod cell;
+pub mod complete;
 pub mod split_arc;
 mod sync;
+#[cfg(test)]
+pub mod test;
+pub mod tracing;
 
 pub(crate) use self::cell::OneshotCell;
 pub(crate) use self::sync::SyncWrapper;
