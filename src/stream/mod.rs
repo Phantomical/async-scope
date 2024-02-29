@@ -191,6 +191,9 @@ pub trait ScopedStreamExt: Stream {
     /// the `poll_next` call on the [`Spawn`] stream. The stream and the loop
     /// body will still be able to execute concurrently.
     ///
+    /// Note that unlike [`scope_buffered`][0] and [`scope_buffer_unordered`][1]
+    /// this does not make the stream evaluate multiple items concurrently.
+    ///
     /// # Cancellation
     /// Dropping the returned [`Spawn`] stream will abort the spawned task.
     ///
@@ -199,6 +202,9 @@ pub trait ScopedStreamExt: Stream {
     /// once all buffered items have been produced. If the stream is dropped
     /// before the panic is thrown then that will count as an unhandled panic
     /// and the parent [`AsyncScope`] will panic once the main task exits.
+    ///
+    /// [0]: ScopedStreamExt::scope_buffered
+    /// [1]: ScopedStreamExt::scope_buffer_unordered
     fn scope_spawn<'scope>(self, buffer: usize, scope: &ScopeHandle<'scope>) -> Spawn<'scope, Self>
     where
         Self: Send + Sized + 'scope,
