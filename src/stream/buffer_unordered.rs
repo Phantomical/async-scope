@@ -132,7 +132,6 @@ mod tests {
     /// This tests that the results from futures submitted to
     /// scope_buffer_unordered can resolve out of order.
     #[tokio::test]
-    #[tracing_test::traced_test]
     async fn out_of_order() {
         let scope = scope!(|scope| {
             let (tx1, rx1) = oneshot::channel();
@@ -156,7 +155,6 @@ mod tests {
     /// This test validates that futures outside of the buffered window are not
     /// executed until some space clears up in that window.
     #[tokio::test]
-    #[tracing_test::traced_test]
     async fn out_of_window() {
         let scope = scope!(|scope| {
             let (tx1, rx1) = oneshot::channel();
@@ -189,7 +187,6 @@ mod tests {
     /// This validates that futures within the buffer window are executed
     /// concurrently.
     #[tokio::test]
-    #[tracing_test::traced_test]
     async fn concurrent() {
         async fn pingpong(tx: oneshot::Sender<i32>, rx: oneshot::Receiver<i32>, ping: bool) -> i32 {
             if ping {

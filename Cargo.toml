@@ -11,16 +11,17 @@ concurrent-queue = "2.4.0"
 pin-project-lite = "0.2.13"
 
 futures-core = { version = "0.3.30", optional = true }
-tracing = { version = "0.1.40", optional = true }
 
 [dependencies.futures-util]
 version = "0.3.30"
 default-features = false
-features = ["std"]
+features = ["alloc"]
 
 [dev-dependencies]
-tokio = { version = "1.0", features = ["full"] }
-futures = "0.3.30"
-tracing-test = "0.2.4"
-tracing = "0.1.40"
+tokio = { version = "1.0", features = ["rt", "macros", "time", "sync"] }
 assert_matches = "1.5.0"
+
+[dev-dependencies.futures]
+version = "0.3.30"
+default-features = false
+features = ["std"]

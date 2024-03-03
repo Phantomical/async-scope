@@ -136,7 +136,6 @@ mod tests {
     use crate::util::test::resolve;
 
     #[tokio::test]
-    #[tracing_test::traced_test]
     async fn out_of_order() {
         let scope = scope!(|scope| {
             let (tx1, rx1) = oneshot::channel();
@@ -162,7 +161,6 @@ mod tests {
     /// This validates that futures within the buffer window are executed
     /// concurrently.
     #[tokio::test]
-    #[tracing_test::traced_test]
     async fn concurrent() {
         async fn pingpong(tx: oneshot::Sender<i32>, rx: oneshot::Receiver<i32>, ping: bool) -> i32 {
             if ping {

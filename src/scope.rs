@@ -7,7 +7,7 @@ use crate::error::Payload;
 use crate::executor::{self, Executor};
 use crate::util::complete::RequirePending;
 use crate::util::split_arc::{Full, Partial};
-use crate::util::{tracing, OneshotCell};
+use crate::util::OneshotCell;
 use crate::wrapper::{TaskAbortHandle, WrapFuture};
 use crate::{scope, JoinError};
 
@@ -184,11 +184,7 @@ impl<'a, T> JoinHandle<'a, T> {
 impl<'a, T> Future for JoinHandle<'a, T> {
     type Output = Result<T, JoinError>;
 
-    #[allow(unused_variables)]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let handle = &*self.handle as *const TaskAbortHandle;
-        tracing::trace!(handle = ?handle, "polling JoinHandle");
-
         debug_assert!(
             !self.check.is_ready(),
             "polled a JoinHandle that had already completed"
@@ -199,7 +195,6 @@ impl<'a, T> Future for JoinHandle<'a, T> {
             Poll::Pending => return Poll::Pending,
         };
 
-        tracing::trace!(handle = ?handle, "JoinHandle complete");
         self.check.set_ready();
 
         Poll::Ready(match result {
