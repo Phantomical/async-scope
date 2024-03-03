@@ -10,6 +10,9 @@ use futures_util::StreamExt;
 
 use crate::{JoinHandle, ScopeHandle};
 
+/// Stream for [`scope_spawn`].
+/// 
+/// [`scope_spawn`]: super::ScopedStreamExt::scope_spawn
 pub struct Spawn<'scope, S>
 where
     S: Stream,

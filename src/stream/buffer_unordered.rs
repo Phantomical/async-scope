@@ -57,6 +57,30 @@ where
             scope: Some(scope.clone()),
         }
     }
+
+    /// Acquire a reference to the underlying sink or stream that this
+    /// combinator is pulling from.
+    pub fn get_ref(&self) -> &S {
+        &self.stream
+    }
+
+    /// Acquire a mutable reference to the underlying stream that this
+    /// combinator is pulling from.
+    ///
+    /// Note that care must be taken to avoid tampering with the state of the
+    /// stream which may otherwise confuse this combinator.
+    pub fn get_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    /// Acquire a pinned mutable reference to the underlying stream that this
+    /// combinator is pulling from.
+    ///
+    /// Note that care must be taken to avoid tampering with the state of the
+    /// stream which may otherwise confuse this combinator.
+    pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut S> {
+        self.project().stream
+    }
 }
 
 impl<'scope, S> Stream for BufferUnordered<'scope, S>

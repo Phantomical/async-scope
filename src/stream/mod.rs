@@ -22,8 +22,9 @@
 //!     // All futures in the stream are paused while the work in the loop here
 //!     // is running. Not so bad in this case, but can be much worse when the
 //!     // work takes longer.
+//! #   /* <- optimization to make doctests run a bit faster
 //!     tokio::time::sleep(Duration::from_millis(50)).await;
-//!     # break;
+//! #   */
 //! }
 //! # }
 //! ```
@@ -36,9 +37,6 @@
 //!
 //! By using the combinators in [`ScopedStreamExt`] the futures are polled by
 //! the scope itself and so they can run concurrently with the loop itself.
-//!
-//! # Examples
-//! TODO
 //!
 //! [0]: https://docs.rs/futures/latest/futures/stream/trait.StreamExt.html
 
