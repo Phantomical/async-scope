@@ -7,7 +7,7 @@
 //! This prevents a somewhat common issue when using certain stream combinators
 //! in a loop (notably, the `buffered` combinator). See the code below:
 //! ```
-//! # #[tokio::main]
+//! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() {
 //! # use std::time::Duration;
 //! use futures::StreamExt;
@@ -69,7 +69,7 @@ pub use self::spawn::Spawn;
 /// This prevents a common issue with streams where one has a for loop that
 /// looks like this:
 /// ```
-/// # #[tokio::main]
+/// # #[tokio::main(flavor = "current_thread")]
 /// # async fn main() {
 /// # use std::time::Duration;
 /// use futures::StreamExt;
@@ -84,7 +84,9 @@ pub use self::spawn::Spawn;
 ///     // All futures in the stream are paused while the work in the loop here
 ///     // is running. Not so bad in this case, but can be much worse when the
 ///     // work takes longer.
+/// #   /* <- optimization to make doctests run a bit faster
 ///     tokio::time::sleep(Duration::from_millis(50)).await;
+/// #   */
 /// }
 /// # }
 /// ```
@@ -148,7 +150,7 @@ pub trait ScopedStreamExt: Stream {
     ///
     /// # Examples
     /// ```
-    /// # #[tokio::main]
+    /// # #[tokio::main(flavor = "current_thread")]
     /// # async fn main() -> Result<(), i32> {
     /// use futures::channel::oneshot;
     /// use futures::stream::{self, StreamExt};
