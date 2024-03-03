@@ -27,4 +27,4 @@ runs:
 
     - uses: github/codeql-action/upload-sarif@v3
       with:
-        sarif-file: "${{ runner.temp }}/actionlint.sarif"
+        sarif_file: "${{ runner.temp }}/actionlint.sarif"
