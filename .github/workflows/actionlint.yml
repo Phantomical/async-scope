@@ -1,6 +1,8 @@
 name: actionlint
 on:
   push:
+    branches:
+      - main
     paths:
       - .github/workflows/*.yml
   pull_request:
@@ -19,7 +21,7 @@ jobs:
 
       - name: Run actionlint
         run: |
-          actionlint                                                    \
+          ./actionlint                                                    \
             -format "$(cat .github/data/actionlint-sarif-template.txt)" \
             > actionlint.sarif
 
