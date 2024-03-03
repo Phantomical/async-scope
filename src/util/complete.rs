@@ -1,8 +1,7 @@
-
 #[derive(Default)]
 pub(crate) struct RequirePending {
     #[cfg(debug_assertions)]
-    ready: bool
+    ready: bool,
 }
 
 impl RequirePending {
