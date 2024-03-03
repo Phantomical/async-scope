@@ -115,3 +115,6 @@ macro_rules! scope {
         })
     };
 }
+
+#[cfg(test)]
+mod tests;
