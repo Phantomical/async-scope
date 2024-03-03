@@ -9,7 +9,9 @@ use pin_project_lite::pin_project;
 use crate::{JoinHandle, ScopeHandle};
 
 pin_project! {
-    /// Stream for the [`scope_buffered`] method.
+    /// Stream for [`scope_buffered`].
+    ///
+    /// [`scope_buffered`]: super::ScopedStreamExt::scope_buffered
     pub struct Buffered<'scope, S>
     where
         S: Stream,
@@ -52,6 +54,30 @@ where
             queue: VecDeque::with_capacity(n),
             scope: Some(scope.clone()),
         }
+    }
+
+    /// Acquire a reference to the underlying sink or stream that this
+    /// combinator is pulling from.
+    pub fn get_ref(&self) -> &S {
+        &self.stream
+    }
+
+    /// Acquire a mutable reference to the underlying stream that this
+    /// combinator is pulling from.
+    ///
+    /// Note that care must be taken to avoid tampering with the state of the
+    /// stream which may otherwise confuse this combinator.
+    pub fn get_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
+    /// Acquire a pinned mutable reference to the underlying stream that this
+    /// combinator is pulling from.
+    ///
+    /// Note that care must be taken to avoid tampering with the state of the
+    /// stream which may otherwise confuse this combinator.
+    pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut S> {
+        self.project().stream
     }
 }
 

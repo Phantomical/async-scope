@@ -1,19 +1,12 @@
 use std::future::{pending, Future};
 use std::panic::AssertUnwindSafe;
-use std::time::Duration;
 
 use futures_util::FutureExt;
 use tokio::sync::Barrier;
 use tokio::task::yield_now;
 
+use super::assert_does_not_hang;
 use crate::{scope, ScopeHandle};
-
-async fn assert_does_not_hang<F: Future>(future: F) -> F::Output {
-    match tokio::time::timeout(Duration::from_secs(1), future).await {
-        Ok(result) => result,
-        Err(_) => panic!("future timed out after 1s"),
-    }
-}
 
 /// This test ensures that the spawned tests are actually run in parallel.
 #[tokio::test]

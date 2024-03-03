@@ -10,6 +10,9 @@ use futures_util::StreamExt;
 
 use crate::{JoinHandle, ScopeHandle};
 
+/// Stream for [`scope_spawn`].
+///
+/// [`scope_spawn`]: super::ScopedStreamExt::scope_spawn
 pub struct Spawn<'scope, S>
 where
     S: Stream,
@@ -42,9 +45,8 @@ where
     type Item = S::Item;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.channel.poll_pop(cx) {
-            Poll::Ready(value) => return Poll::Ready(Some(value)),
-            _ => (),
+        if let Poll::Ready(value) = self.channel.poll_pop(cx) {
+            return Poll::Ready(Some(value));
         }
 
         match Pin::new(&mut self.handle).poll(cx) {
