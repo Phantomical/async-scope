@@ -6,7 +6,7 @@
 //!
 //! To do this, declare a new scope using the [`scope!`] macro
 //! ```
-//! # #[tokio::main]
+//! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() {
 //! let mut x = 0;
 //!
@@ -65,7 +65,7 @@ pub use crate::scope::{AbortHandle, AsyncScope, JoinHandle, ScopeHandle};
 ///
 /// # Example
 /// ```
-/// # #[tokio::main]
+/// # #[tokio::main(flavor = "current_thread")]
 /// # async fn main() {
 /// use std::time::Duration;
 ///
