@@ -10,10 +10,7 @@ use crate::stream::ScopedStreamExt;
 async fn panic_after_n() {
     let scope = scope!(|scope| {
         let mut stream = futures::stream::iter(0..10)
-            .map(|index| match index {
-                3 => panic!(),
-                _ => (),
-            })
+            .map(|index| assert_ne!(index, 3))
             .scope_spawn(4, &scope);
 
         assert!(stream.next().await.is_some());
