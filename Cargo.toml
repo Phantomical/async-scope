@@ -4,16 +4,19 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-stream = ["dep:futures-core", "dep:futures-channel"]
+stream = ["dep:futures-core"]
 
 [dependencies]
 concurrent-queue = "2.4.0"
-futures-util = { version = "0.3.30", default-features = false, features = ["std"] }
 pin-project-lite = "0.2.13"
 
 futures-core = { version = "0.3.30", optional = true }
-futures-channel = { version = "0.3.30", optional = true }
 tracing = { version = "0.1.40", optional = true }
+
+[dependencies.futures-util]
+version = "0.3.30"
+default-features = false
+features = ["std"]
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
