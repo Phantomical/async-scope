@@ -33,7 +33,7 @@ jobs:
             --all-targets           \
             --all-features          \
             --no-fail-fast          \
-            --success-output final  \
+            --failure-output final  \
             --final-status-level skip
         shell: bash
 
