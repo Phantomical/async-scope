@@ -1,0 +1,30 @@
+name: Actionlint
+description: runs actionlint on the current repository
+
+inputs:
+  version:
+    description: The actionlint version to use.
+    required: true
+    default: latest
+
+runs:
+  using: composite
+  steps:
+    - name: Install ActionLint
+      shell: bash
+      run: |
+        mkdir -p "${{ runner.temp }}/actionlint"
+        bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) \
+          "${{ inputs.version }}" \
+          "${{ runner.temp }}"
+
+    - name: Run ActionLint
+      shell: bash
+      run: |
+        "${{ runner.temp }}/actionlint"                                 \
+          -format "$(cat ${{ github.action_path }}/sarif-template.txt)" \
+          > "${{ runner.temp }}/actionlint.sarif"
+
+    - uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: "${{ runner.temp }}/actionlint.sarif"
