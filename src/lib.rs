@@ -27,22 +27,39 @@
 //! scope, you can cancel individual spawned tasks by calling
 //! [`JoinHandle::abort`].
 
+/// Helper macro used to silence `unused_import` warnings when an item is
+/// only imported in order to refer to it within a doc comment.
+#[allow(unused_macros)]
+macro_rules! used_in_docs {
+    ($( $item:ident ),*) => {
+        const _: () = {
+            #[allow(unused_imports)]
+            mod dummy {
+                $( use super::$item; )*
+            }
+        };
+    };
+}
+
 pub use crate::error::JoinError;
+pub use crate::scope::ScopeHandle;
+
+#[cfg(feature = "stream")]
+pub mod stream;
 
 mod error;
 mod executor;
-#[cfg(feature = "stream")]
-pub mod stream;
+mod scope;
 mod util;
 mod wrapper;
 
 use std::future::Future;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use crate::error::Payload;
+use crate::scope::ScopeExecutor;
 use crate::util::complete::RequirePending;
 use crate::util::split_arc::{Full, Partial};
 use crate::util::OneshotCell;
@@ -105,25 +122,29 @@ use crate::wrapper::{TaskAbortHandle, WrapFuture};
 #[macro_export]
 macro_rules! scope {
     (| $scope:pat_param | $body:expr) => {
-        $crate::exports::new_scope_unchecked(
-            |__scope: &$crate::ScopeHandle| -> $crate::FutureObj<'_, _> {
-                // Doing `let scope = scope` still borrows the outer scope.
-                // In order to force a move into the block we need a non-copy
-                // type along with
-                let __scope = $crate::exports::SmuggleDataIntoBlock(__scope);
+        $crate::exports::new_scope_unchecked(|__scope: $crate::ScopeHandle| {
+            // Attempting to do `let $scope = __scope` actually ends up still borrowing
+            // __scope instead of moving it.
+            //
+            // In order to actually ensure that we move __scope into the async scope we need
+            // 2 things
+            // 1. A non-copy type. Here that's SmuggleDataIntoBlock.
+            // 2. A method that consumes it by value. We use the into_inner method.
+            //
+            // Missing either of these will still take a reference instead of moving the
+            // value into the returned future.
+            let __scope = $crate::exports::SmuggleDataIntoBlock(__scope);
 
-                $crate::exports::pin_send(async {
-                    let $scope = __scope.into_inner();
+            $crate::exports::pin_send(async {
+                let $scope = __scope.into_inner();
 
-                    $body
-                })
-            },
-        )
+                $body
+            })
+        })
     };
 }
 
 type FutureObj<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-type ScopeExecutor<'env> = crate::executor::Executor<FutureObj<'env, ()>>;
 
 #[cfg(test)]
 mod tests;
@@ -151,7 +172,7 @@ pub mod exports {
 
     pub fn new_scope_unchecked<'env, F, T>(func: F) -> crate::AsyncScope<'env, T>
     where
-        F: for<'scope> FnOnce(&'scope ScopeHandle<'env>) -> FutureObj<'scope, T>,
+        F: for<'scope> FnOnce(ScopeHandle<'scope, 'env>) -> FutureObj<'scope, T>,
         T: Send + 'env,
     {
         crate::AsyncScope::new(func)
@@ -175,18 +196,21 @@ impl<'env, T> AsyncScope<'env, T> {
     /// Create a new `AsyncScope` from a function that takes a [`ScopeHandle`]
     /// and returns a future.
     ///
-    /// We rely on func being a closure to enforce variance.
-    pub(crate) fn new<F>(func: F) -> Self
+    /// Generally you will want to use [`scope!`] instead since it takes care of
+    /// some tricky and borrowing issues as well as needing to box the initial
+    /// future.
+    pub fn new<F>(func: F) -> Self
     where
-        F: for<'scope> FnOnce(&'scope ScopeHandle<'env>) -> crate::FutureObj<'scope, T>,
+        F: for<'scope> FnOnce(ScopeHandle<'scope, 'env>) -> crate::FutureObj<'scope, T>,
         T: Send + 'env,
     {
         let executor = Arc::new(ScopeExecutor::new());
-        let scope = ScopeHandle::new(&executor);
 
-        // SAFETY: We ensure that no references to ScopeHandle can escape this
-        //         AsyncScope by the liftime bounds on func.
-        let scope = unsafe { &*(scope as *const ScopeHandle<'env>) };
+        // SAFETY: We need to ensure that the 'scope lifetime in this handle ends before
+        //         the scope itself is dropped (not just at the same time). We do this
+        //         by clearing the executor in our destructor before the Arc destructor
+        //         runs.
+        let scope = unsafe { executor.handle() };
 
         let future = func(scope);
         let (future, handle) = WrapFuture::new_send(future, scope);
@@ -246,58 +270,6 @@ impl<'env, T> Drop for AsyncScope<'env, T> {
     }
 }
 
-/// A handle to an [`AsyncScope`] that allows spawning scoped tasks on it.
-///
-/// This is provided to the closure passed to the [`scope!`] macro.
-///
-/// See the [crate] docs for details.
-#[repr(transparent)]
-pub struct ScopeHandle<'env> {
-    executor: ScopeExecutor<'static>,
-    _marker: PhantomData<&'env ()>,
-}
-
-impl<'env> ScopeHandle<'env> {
-    fn new<'scope>(executor: &'scope ScopeExecutor<'env>) -> &'scope Self {
-        unsafe { &*(executor as *const ScopeExecutor<'env> as *const Self) }
-    }
-
-    /// Spawn a new task within the scope, returning a [`JoinHandle`] to it.
-    ///
-    /// Unlike a non-scoped spawn, threads spawned with this function may borrow
-    /// non-`'static` data from outside the scope. See the [`crate`] docs for
-    /// details.
-    ///
-    /// The join handle can be awaited on to join the spawned task. If the
-    /// spawned tasks panics then the output of awaiting the [`JoinHandle`] will
-    /// be an [`Err`] containing the panic payload.
-    ///
-    /// If the join handle is dropped then the spawned task will be implicitly
-    /// joined at the end of the scope. In that case, the scope will panic after
-    /// all tasks have been joined. If
-    /// [`AsyncScope::cancel_remaining_tasks_on_exit`] has been set to `true`,
-    /// then the scope will not join tasks but will still panic after all tasks
-    /// are canceled.
-    ///
-    /// If the [`JoinHandle`] outlives the scope and is then dropped, then the
-    /// panic will be lost.
-    pub fn spawn<'scope, F>(&'scope self, future: F) -> JoinHandle<'env, 'scope, F::Output>
-    where
-        F: Future + Send + 'scope,
-        F::Output: Send,
-    {
-        let (future, handle) = WrapFuture::new_send(future, self);
-        let future: FutureObj<'static, ()> = unsafe { std::mem::transmute(future) };
-
-        self.executor.spawn(future);
-        handle
-    }
-
-    pub(crate) fn mark_unhandled_panic(&self, payload: Payload) {
-        self.executor.set_unhandled_panic(payload);
-    }
-}
-
 /// An owned permission to join a scoped task (await its termination).
 ///
 /// This can be thought of as an equivalent to [`std::thread::ScopedJoinHandle`]
@@ -305,7 +277,7 @@ impl<'env> ScopeHandle<'env> {
 /// `JoinHandle` started running immediately once you called `spawn`, even if
 /// the [`JoinHandle`] has not been awaited yet.
 pub struct JoinHandle<'scope, 'env, T> {
-    scope: &'scope ScopeHandle<'env>,
+    scope: ScopeHandle<'scope, 'env>,
     handle: Full<TaskAbortHandle, OneshotCell<Result<T, Payload>>>,
 
     /// In debug mode we check to ensure that we aren't polled once the future
@@ -315,7 +287,7 @@ pub struct JoinHandle<'scope, 'env, T> {
 
 impl<'scope, 'env, T> JoinHandle<'scope, 'env, T> {
     pub(crate) fn new(
-        scope: &'scope ScopeHandle<'env>,
+        scope: ScopeHandle<'scope, 'env>,
         handle: Full<TaskAbortHandle, OneshotCell<Result<T, Payload>>>,
     ) -> Self {
         Self {

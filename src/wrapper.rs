@@ -16,7 +16,7 @@ pin_project! {
     pub(crate) struct WrapFuture<'scope, 'env, F: Future> {
         #[pin]
         future: F,
-        scope: &'scope ScopeHandle<'env>,
+        scope: ScopeHandle<'scope, 'env>,
         shared: Full<TaskAbortHandle, OneshotCell<Result<F::Output, Payload>>>,
     }
 }
@@ -24,7 +24,7 @@ pin_project! {
 impl<'scope, 'env, F: Future> WrapFuture<'scope, 'env, F> {
     fn new(
         future: F,
-        scope: &'scope ScopeHandle<'env>,
+        scope: ScopeHandle<'scope, 'env>,
     ) -> (Self, JoinHandle<'scope, 'env, F::Output>) {
         let abort = Full::new(
             TaskAbortHandle {
@@ -52,7 +52,7 @@ where
 {
     pub fn new_send(
         future: F,
-        scope: &'scope ScopeHandle<'env>,
+        scope: ScopeHandle<'scope, 'env>,
     ) -> (FutureObj<'scope, ()>, JoinHandle<'scope, 'env, F::Output>) {
         let (future, handle) = Self::new(future, scope);
 

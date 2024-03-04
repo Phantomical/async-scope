@@ -22,12 +22,3 @@ impl<'a> Covariant<'a> {
         Self(PhantomData)
     }
 }
-
-#[derive(Copy, Clone, Debug, Default)]
-pub struct Contravariant<'a>(PhantomData<fn() -> &'a ()>);
-
-impl<'a> Contravariant<'a> {
-    pub const fn new() -> Self {
-        Self(PhantomData)
-    }
-}

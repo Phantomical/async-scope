@@ -69,7 +69,7 @@ async fn spawn_immediate() {
 #[tokio::test]
 async fn spawn_late() {
     fn mktask<'scope: 'env, 'env, F>(
-        scope: &'scope ScopeHandle<'env>,
+        scope: ScopeHandle<'scope, 'env>,
         inner: F,
     ) -> impl Future<Output = ()> + Send + 'scope
     where
@@ -82,13 +82,13 @@ async fn spawn_late() {
 
     let scope = scope!(|scope| {
         let task = async {};
-        let task = mktask(&scope, task);
-        let task = mktask(&scope, task);
-        let task = mktask(&scope, task);
-        let task = mktask(&scope, task);
-        let task = mktask(&scope, task);
-        let task = mktask(&scope, task);
-        let task = mktask(&scope, task);
+        let task = mktask(scope, task);
+        let task = mktask(scope, task);
+        let task = mktask(scope, task);
+        let task = mktask(scope, task);
+        let task = mktask(scope, task);
+        let task = mktask(scope, task);
+        let task = mktask(scope, task);
 
         scope.spawn(task);
     });
@@ -221,4 +221,22 @@ async fn unhandled_subtask_panic_propagates_payload() {
         .expect_err("scope did not panic");
 
     assert!(error.is::<DummyPanic>());
+}
+
+#[tokio::test]
+async fn return_borrowed_data() {
+    let a = 0;
+    let b = 1;
+
+    let scope = scope!(|scope| {
+        let a = scope.spawn(async { &a });
+        let b = scope.spawn(async { &b });
+
+        let a = a.await.unwrap();
+        let b = b.await.unwrap();
+
+        assert_ne!(a, b);
+    });
+
+    scope.await;
 }

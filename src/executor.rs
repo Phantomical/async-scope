@@ -7,9 +7,13 @@ use futures_util::stream::futures_unordered::FuturesUnordered;
 use futures_util::task::AtomicWaker;
 use futures_util::StreamExt;
 
-use crate::error::Payload;
-use crate::util::{OneshotCell, Uncontended};
+use crate::util::Uncontended;
 
+/// The core executor used to drive the scope.
+///
+/// This is mainly a wrapper around a [`FuturesUnordered`] with the addition of
+/// a queue to hold onto newly spawned tasks before they get added onto the
+/// executor.
 pub(crate) struct Executor<F> {
     exec: Uncontended<FuturesUnordered<F>>,
 
@@ -23,7 +27,6 @@ pub(crate) struct Executor<F> {
     queue: Mutex<VecDeque<F>>,
 
     waker: AtomicWaker,
-    unhandled_panic: OneshotCell<Payload>,
 }
 
 impl<F> Executor<F> {
@@ -32,16 +35,7 @@ impl<F> Executor<F> {
             exec: Uncontended::new(FuturesUnordered::new()),
             waker: AtomicWaker::new(),
             queue: Mutex::new(VecDeque::new()),
-            unhandled_panic: OneshotCell::new(),
         }
-    }
-
-    pub fn unhandled_panic(&self) -> Option<Payload> {
-        self.unhandled_panic.take().ok()
-    }
-
-    pub fn set_unhandled_panic(&self, payload: Payload) {
-        let _ = self.unhandled_panic.store(payload);
     }
 }
 
