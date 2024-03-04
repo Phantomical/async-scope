@@ -1,57 +1,66 @@
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
-use futures_util::task::AtomicWaker;
+use futures_util::task::{AtomicWaker, FutureObj};
 use pin_project_lite::pin_project;
 
 use crate::error::Payload;
-use crate::executor::UnhandledPanicFlag;
 use crate::util::split_arc::Full;
 use crate::util::OneshotCell;
-use crate::JoinHandle;
-
-static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+use crate::{JoinHandle, ScopeHandle};
 
 pin_project! {
-    pub(crate) struct WrapFuture<F: Future> {
+    pub(crate) struct WrapFuture<'scope, 'env, F: Future> {
         #[pin]
         future: F,
+        scope: &'scope ScopeHandle<'env>,
         shared: Full<TaskAbortHandle, OneshotCell<Result<F::Output, Payload>>>,
-        id: u64,
     }
 }
 
-impl<F: Future> WrapFuture<F> {
-    pub fn new<'a>(
+impl<'scope, 'env, F: Future> WrapFuture<'scope, 'env, F> {
+    fn new(
         future: F,
-        unhandled_panic: UnhandledPanicFlag,
-    ) -> (Self, JoinHandle<'a, F::Output>) {
+        scope: &'scope ScopeHandle<'env>,
+    ) -> (Self, JoinHandle<'scope, 'env, F::Output>) {
         let abort = Full::new(
             TaskAbortHandle {
                 cancelled: AtomicBool::new(false),
                 waker: AtomicWaker::new(),
-                unhandled_panic,
             },
             OneshotCell::new(),
         );
 
-        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-
         (
             Self {
                 future,
+                scope,
                 shared: abort.clone(),
-                id,
             },
-            JoinHandle::new(abort),
+            JoinHandle::new(scope, abort),
         )
     }
 }
 
-impl<F: Future> Future for WrapFuture<F> {
+impl<'scope, 'env, F> WrapFuture<'scope, 'env, F>
+where
+    F: Future + Send + 'scope,
+    F::Output: Send + 'scope,
+{
+    pub fn new_send(
+        future: F,
+        scope: &'scope ScopeHandle<'env>,
+    ) -> (FutureObj<'scope, ()>, JoinHandle<'scope, 'env, F::Output>) {
+        let (future, handle) = Self::new(future, scope);
+
+        (FutureObj::from(Box::pin(future)), handle)
+    }
+}
+
+impl<'scope, 'env, F: Future> Future for WrapFuture<'scope, 'env, F> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -75,7 +84,7 @@ impl<F: Future> Future for WrapFuture<F> {
         };
 
         if let Err(Err(payload)) = cell.store(result) {
-            shared.unhandled_panic.mark_unhandled_panic(payload);
+            this.scope.mark_unhandled_panic(payload);
         }
 
         Poll::Ready(())
@@ -85,16 +94,11 @@ impl<F: Future> Future for WrapFuture<F> {
 pub(crate) struct TaskAbortHandle {
     waker: AtomicWaker,
     cancelled: AtomicBool,
-    unhandled_panic: UnhandledPanicFlag,
 }
 
 impl TaskAbortHandle {
     pub fn abort(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
         self.waker.wake();
-    }
-
-    pub fn mark_unhandled_panic(&self, payload: Payload) {
-        self.unhandled_panic.mark_unhandled_panic(payload);
     }
 }

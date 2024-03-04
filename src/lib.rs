@@ -48,6 +48,9 @@ pub mod stream;
 mod util;
 mod wrapper;
 
+use std::future::Future;
+use std::pin::Pin;
+
 pub use crate::error::JoinError;
 pub use crate::scope::{AbortHandle, AsyncScope, JoinHandle, ScopeHandle};
 
@@ -107,14 +110,55 @@ pub use crate::scope::{AbortHandle, AsyncScope, JoinHandle, ScopeHandle};
 /// [tokio-spawn]: https://docs.rs/tokio/latest/tokio/task/fn.spawn.html
 #[macro_export]
 macro_rules! scope {
-    (| $scope:ident | $body:expr) => {
-        $crate::AsyncScope::new(|$scope| async {
-            let $scope = $scope;
+    (| $scope:pat_param | $body:expr) => {
+        $crate::exports::new_scope_unchecked(
+            |__scope: &$crate::ScopeHandle| -> $crate::FutureObj<'_, _> {
+                // Doing `let scope = scope` still borrows the outer scope.
+                // In order to force a move into the block we need a non-copy
+                // type along with
+                let __scope = $crate::exports::SmuggleDataIntoBlock(__scope);
 
-            $body
-        })
+                $crate::exports::pin_send(async {
+                    let $scope = __scope.into_inner();
+
+                    $body
+                })
+            },
+        )
     };
 }
 
+pub type FutureObj<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
 #[cfg(test)]
 mod tests;
+
+#[doc(hidden)]
+pub mod exports {
+    use std::future::Future;
+
+    use crate::{FutureObj, ScopeHandle};
+
+    pub struct SmuggleDataIntoBlock<T>(pub T);
+
+    impl<T> SmuggleDataIntoBlock<T> {
+        pub fn into_inner(self) -> T {
+            self.0
+        }
+    }
+
+    pub fn pin_send<'a, F>(future: F) -> crate::FutureObj<'a, F::Output>
+    where
+        F: Future + Send + 'a,
+    {
+        Box::pin(future)
+    }
+
+    pub fn new_scope_unchecked<'env, F, T>(func: F) -> crate::AsyncScope<'env, T>
+    where
+        F: for<'scope> FnOnce(&'scope ScopeHandle<'env>) -> FutureObj<'scope, T>,
+        T: Send + 'env,
+    {
+        crate::AsyncScope::new(func)
+    }
+}

@@ -1,152 +1,120 @@
+use std::collections::VecDeque;
 use std::future::Future;
-use std::pin::Pin;
-use std::sync::Mutex;
 use std::task::{Context, Poll};
 
-use concurrent_queue::ConcurrentQueue;
 use futures_util::stream::futures_unordered::FuturesUnordered;
 use futures_util::task::AtomicWaker;
 use futures_util::StreamExt;
+use parking_lot::Mutex;
 
 use crate::error::Payload;
-use crate::util::split_arc::{Full, Partial};
+use crate::util::{OneshotCell, Uncontended};
 
-type FutureObj<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+pub(crate) struct Executor<F> {
+    exec: Uncontended<FuturesUnordered<F>>,
 
-struct Shared {
+    /// New tasks can only be spawned through `ScopeHandle` and it is not
+    /// possible to send a `ScopeHandle` outside of the executor.
+    ///
+    /// This means that, usually, accesses to the queue should be uncontended
+    /// and therefore a mutex is fast enough. However it is still possible that
+    /// the handle gets passed to another thread (e.g. via `std::thread::scope`
+    /// or unsafe) so we can't use `Uncontended` here.
+    queue: Mutex<VecDeque<F>>,
+
     waker: AtomicWaker,
-    unhandled_panic: Mutex<Option<Payload>>,
+    unhandled_panic: OneshotCell<Payload>,
 }
 
-pub(crate) struct Executor<'a> {
-    exec: FuturesUnordered<FutureObj<'a>>,
-    shared: Full<Shared, ConcurrentQueue<FutureObj<'a>>>,
-}
-
-impl<'a> Executor<'a> {
+impl<F> Executor<F> {
     pub fn new() -> Self {
         Self {
-            shared: Full::new(
-                Shared {
-                    waker: AtomicWaker::new(),
-                    unhandled_panic: Mutex::new(None),
-                },
-                ConcurrentQueue::unbounded(),
-            ),
-            exec: FuturesUnordered::new(),
-        }
-    }
-
-    pub fn handle(&self) -> Handle<'a> {
-        Handle {
-            shared: self.shared.clone(),
+            exec: Uncontended::new(FuturesUnordered::new()),
+            waker: AtomicWaker::new(),
+            queue: Mutex::new(VecDeque::new()),
+            unhandled_panic: OneshotCell::new(),
         }
     }
 
     pub fn unhandled_panic(&self) -> Option<Payload> {
-        let mut panic = self
-            .shared
-            .unhandled_panic
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
-        panic.take()
+        self.unhandled_panic.take().ok()
     }
 
-    pub fn unhandled_panic_flag(&self) -> UnhandledPanicFlag {
-        UnhandledPanicFlag(Full::downgrade(&self.shared))
+    pub fn set_unhandled_panic(&self, payload: Payload) {
+        let _ = self.unhandled_panic.store(payload);
+    }
+}
+
+impl<F> Executor<F>
+where
+    F: Future<Output = ()>,
+{
+    /// Spawn a new task onto the executor.
+    ///
+    /// This puts it into a queue which will be drained later, once polling is
+    /// done.
+    pub fn spawn(&self, future: F) {
+        self.queue.lock().push_back(future);
+        self.waker.wake();
     }
 
-    pub fn spawn(&mut self, future: FutureObj<'a>) {
-        self.exec.push(future);
+    /// Spawn a new task directly onto the executor.
+    ///
+    /// This is an **uncontended** method.
+    ///
+    /// # Panics
+    /// Panics if called concurrently with any other **uncontended** methods.
+    pub fn spawn_direct(&self, future: F) {
+        self.exec.lock().push(future);
     }
 
-    fn spawn_all(&mut self) -> usize {
-        let mut count = 0;
-        let spawn = Full::value(&self.shared);
-
-        while let Ok(future) = spawn.pop() {
-            self.exec.push(future);
-            count += 1;
-        }
-
-        count
+    /// Clear all tasks from the executor.
+    ///
+    /// This is an **uncontended** method.
+    ///
+    /// # Panics
+    /// Panics if called concurrently with any other **uncontended** methods.
+    pub fn clear(&self) {
+        self.exec.lock().clear();
     }
 
-    pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
-        self.shared.waker.register(cx.waker());
+    /// Poll the tasks on the executor.
+    ///
+    /// This is an **uncontended** method.
+    ///
+    /// # Panics
+    /// Panics if called concurrently with any other **uncontended** methods.
+    pub fn poll(&self, cx: &mut Context<'_>) -> Poll<()> {
+        self.waker.register(cx.waker());
 
-        let poll = self.exec.poll_next_unpin(cx);
-        let more = self.spawn_all() != 0;
+        let mut exec = self.exec.lock();
+        let poll = exec.poll_next_unpin(&mut *cx);
 
-        if more {
-            // We have some freshly spawned tasks so we should wake up immediately.
-            cx.waker().wake_by_ref();
-        }
+        // We need to be careful not to hold the queue lock while polling exec since
+        // then a task attempting to spawn another would cause a deadlock.
+        let mut queue = self.queue.lock();
+        let more = !queue.is_empty();
+
+        exec.extend(queue.drain(..));
 
         match poll {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(())) => {
-                // We don't want to poll exec multiple times without yielding to the executor so
-                // if a task completes we yield to the executor but notify it that we want to
-                // wake up immediately.
+            // More work just got added so we need to wake back up immediately.
+            //
+            // We don't poll exec in a loop here because that would result in tasks being polled
+            // multiple times per top-level poll which can easily lead to exponential blowup once
+            // you nest multiple layers of `AsyncScope`s.
+            _ if more => {
                 cx.waker().wake_by_ref();
                 Poll::Pending
             }
-            // The executor is empty but more tasks have just been spawned so there is still work to
-            // do. The waker has already been awoken up above.
-            Poll::Ready(None) if more => Poll::Pending,
+            // The executor still has more to do, same logic as above.
+            Poll::Ready(Some(())) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Poll::Pending => Poll::Pending,
             // No tasks and nothing spawned, we're done.
             Poll::Ready(None) => Poll::Ready(()),
-        }
-    }
-}
-
-impl<'a> Drop for Executor<'a> {
-    fn drop(&mut self) {
-        let spawn = Full::value(&self.shared);
-
-        // Prevent spawns and wakeups from accumulating
-        spawn.close();
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct Handle<'a> {
-    shared: Full<Shared, ConcurrentQueue<FutureObj<'a>>>,
-}
-
-impl<'a> Handle<'a> {
-    /// Spawn a new future onto the [`Executor`] for this handle.
-    ///
-    /// # Panics
-    /// Panics if the executor has already been dropped.
-    pub fn spawn(&self, future: FutureObj<'a>) {
-        let spawn = Full::value(&self.shared);
-        if spawn.push(future).is_err() {
-            panic!("attempted to spawn a future on a dead AsyncScope")
-        }
-
-        self.shared.waker.wake();
-    }
-
-    pub fn unhandled_panic_flag(&self) -> UnhandledPanicFlag {
-        UnhandledPanicFlag(Full::downgrade(&self.shared))
-    }
-}
-
-pub(crate) struct UnhandledPanicFlag(Partial<Shared>);
-
-impl UnhandledPanicFlag {
-    pub fn mark_unhandled_panic(&self, payload: Payload) {
-        let mut panic = self
-            .0
-            .unhandled_panic
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-
-        if panic.is_none() {
-            *panic = Some(payload);
         }
     }
 }

@@ -8,6 +8,15 @@ use tokio::task::yield_now;
 use super::assert_does_not_hang;
 use crate::{scope, ScopeHandle};
 
+fn assert_send<T: Send>() {}
+fn assert_sync<T: Sync>() {}
+
+#[test]
+fn require_send_sync() {
+    assert_send::<crate::AsyncScope<()>>();
+    assert_sync::<crate::AsyncScope<()>>();
+}
+
 /// This test ensures that the spawned tests are actually run in parallel.
 #[tokio::test]
 async fn tasks_run_in_parallel() {
@@ -59,15 +68,13 @@ async fn spawn_immediate() {
 /// when it is spawned.
 #[tokio::test]
 async fn spawn_late() {
-    fn mktask<'scope, F>(
-        scope: &ScopeHandle<'scope>,
+    fn mktask<'scope: 'env, 'env, F>(
+        scope: &'scope ScopeHandle<'env>,
         inner: F,
     ) -> impl Future<Output = ()> + Send + 'scope
     where
         F: Future<Output = ()> + Send + 'scope,
     {
-        let scope = scope.clone();
-
         async move {
             scope.spawn(inner);
         }

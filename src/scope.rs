@@ -1,10 +1,13 @@
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use futures_util::task::FutureObj;
+
 use crate::error::Payload;
-use crate::executor::{self, Executor};
+use crate::executor::Executor;
 use crate::util::complete::RequirePending;
 use crate::util::split_arc::{Full, Partial};
 use crate::util::OneshotCell;
@@ -13,34 +16,42 @@ use crate::{scope, JoinError};
 
 used_in_docs!(scope);
 
+type ScopeExecutor<'env> = Executor<FutureObj<'env, ()>>;
+
 /// A collection of tasks that are run together.
 ///
-/// This type is returned by the [`scope!`] macro. If you already have an
-/// existing async function then you can use [`AsyncScope::new`] instead.
-pub struct AsyncScope<'a, T> {
-    executor: Executor<'a>,
-    main: JoinHandle<'a, T>,
+/// This type is returned by the [`scope!`] macro.
+pub struct AsyncScope<'env, T> {
+    /// The `'env` lifetime here is a lie. `executor` is self-referential.
+    executor: Arc<ScopeExecutor<'env>>,
+
+    /// The second `'env` lifetime here is a lie. It really refers to
+    /// `executor`.
+    main: JoinHandle<'env, 'env, T>,
     cancel_remaining_tasks_on_exit: bool,
 }
 
-impl<'a, T> AsyncScope<'a, T> {
+impl<'env, T> AsyncScope<'env, T> {
     /// Create a new `AsyncScope` from a function that takes a [`ScopeHandle`]
     /// and returns a future.
     ///
-    /// Usually you want to use [`scope!`] instead. It handles some footguns
-    /// around borrowing.
-    pub fn new<F, Fut>(func: F) -> Self
+    /// We rely on func being a closure to enforce variance.
+    pub(crate) fn new<F>(func: F) -> Self
     where
-        F: FnOnce(ScopeHandle<'a>) -> Fut,
-        Fut: Future<Output = T> + Send + 'a,
-        T: Send,
+        F: for<'scope> FnOnce(&'scope ScopeHandle<'env>) -> crate::FutureObj<'scope, T>,
+        T: Send + 'env,
     {
-        let mut executor = Executor::new();
+        let executor = Arc::new(ScopeExecutor::new());
+        let scope = ScopeHandle::new(&executor);
 
-        let future = func(ScopeHandle::new(executor.handle()));
-        let (future, handle) = WrapFuture::new(future, executor.unhandled_panic_flag());
+        // SAFETY: We ensure that no references to ScopeHandle can escape this
+        //         AsyncScope by the liftime bounds on func.
+        let scope = unsafe { &*(scope as *const ScopeHandle<'env>) };
 
-        executor.spawn(Box::pin(future));
+        let future = func(scope);
+        let (future, handle) = WrapFuture::new_send(future, scope);
+
+        executor.spawn_direct(future);
 
         Self {
             executor,
@@ -64,7 +75,7 @@ impl<'a, T> AsyncScope<'a, T> {
     }
 }
 
-impl<'a, R> Future for AsyncScope<'a, R> {
+impl<'env, R> Future for AsyncScope<'env, R> {
     type Output = R;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -87,19 +98,28 @@ impl<'a, R> Future for AsyncScope<'a, R> {
     }
 }
 
+impl<'env, T> Drop for AsyncScope<'env, T> {
+    fn drop(&mut self) {
+        // The futures within the executor may have ScopeHandle references. We need to
+        // drop them before the executor itself is dropped.
+        self.executor.clear();
+    }
+}
+
 /// A handle to an [`AsyncScope`] that allows spawning scoped tasks on it.
 ///
 /// This is provided to the closure passed to the [`scope!`] macro.
 ///
 /// See the [crate] docs for details.
-#[derive(Clone)]
-pub struct ScopeHandle<'a> {
-    handle: executor::Handle<'a>,
+#[repr(transparent)]
+pub struct ScopeHandle<'env> {
+    executor: ScopeExecutor<'static>,
+    _marker: PhantomData<&'env ()>,
 }
 
-impl<'a> ScopeHandle<'a> {
-    fn new(handle: executor::Handle<'a>) -> Self {
-        Self { handle }
+impl<'env> ScopeHandle<'env> {
+    fn new<'scope>(executor: &'scope ScopeExecutor<'env>) -> &'scope Self {
+        unsafe { &*(executor as *const ScopeExecutor<'env> as *const Self) }
     }
 
     /// Spawn a new task within the scope, returning a [`JoinHandle`] to it.
@@ -121,14 +141,20 @@ impl<'a> ScopeHandle<'a> {
     ///
     /// If the [`JoinHandle`] outlives the scope and is then dropped, then the
     /// panic will be lost.
-    pub fn spawn<F>(&self, future: F) -> JoinHandle<'a, F::Output>
+    pub fn spawn<'scope, F>(&'scope self, future: F) -> JoinHandle<'env, 'scope, F::Output>
     where
-        F: Future + Send + 'a,
+        F: Future + Send + 'scope,
         F::Output: Send,
     {
-        let (future, handle) = WrapFuture::new(future, self.handle.unhandled_panic_flag());
-        self.handle.spawn(Box::pin(future));
+        let (future, handle) = WrapFuture::new_send(future, self);
+        let future: FutureObj<'static, ()> = unsafe { std::mem::transmute(future) };
+
+        self.executor.spawn(future);
         handle
+    }
+
+    pub(crate) fn mark_unhandled_panic(&self, payload: Payload) {
+        self.executor.set_unhandled_panic(payload);
     }
 }
 
@@ -138,21 +164,24 @@ impl<'a> ScopeHandle<'a> {
 /// for a scoped task. Note that the scoped task associated with this
 /// `JoinHandle` started running immediately once you called `spawn`, even if
 /// the [`JoinHandle`] has not been awaited yet.
-pub struct JoinHandle<'a, T> {
+pub struct JoinHandle<'scope, 'env, T> {
+    scope: &'scope ScopeHandle<'env>,
     handle: Full<TaskAbortHandle, OneshotCell<Result<T, Payload>>>,
-    _marker: PhantomData<&'a ()>,
 
     /// In debug mode we check to ensure that we aren't polled once the future
     /// is complete.
     check: RequirePending,
 }
 
-impl<'a, T> JoinHandle<'a, T> {
-    pub(crate) fn new(handle: Full<TaskAbortHandle, OneshotCell<Result<T, Payload>>>) -> Self {
+impl<'scope, 'env, T> JoinHandle<'scope, 'env, T> {
+    pub(crate) fn new(
+        scope: &'scope ScopeHandle<'env>,
+        handle: Full<TaskAbortHandle, OneshotCell<Result<T, Payload>>>,
+    ) -> Self {
         Self {
+            scope,
             handle,
             check: RequirePending::new(),
-            _marker: PhantomData,
         }
     }
 
@@ -181,7 +210,7 @@ impl<'a, T> JoinHandle<'a, T> {
     }
 }
 
-impl<'a, T> Future for JoinHandle<'a, T> {
+impl<'scope, 'env, T> Future for JoinHandle<'scope, 'env, T> {
     type Output = Result<T, JoinError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -205,15 +234,15 @@ impl<'a, T> Future for JoinHandle<'a, T> {
     }
 }
 
-impl<'a, T> Unpin for JoinHandle<'a, T> {}
+impl<'scope, 'env, T> Unpin for JoinHandle<'scope, 'env, T> {}
 
-impl<'a, T> Drop for JoinHandle<'a, T> {
+impl<'scope, 'env, T> Drop for JoinHandle<'scope, 'env, T> {
     fn drop(&mut self) {
         let cell = Full::value(&self.handle);
         cell.close();
 
         if let Ok(Err(payload)) = cell.take() {
-            self.handle.mark_unhandled_panic(payload);
+            self.scope.mark_unhandled_panic(payload);
         }
     }
 }
