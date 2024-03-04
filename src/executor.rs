@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 use std::future::Future;
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use futures_util::stream::futures_unordered::FuturesUnordered;
 use futures_util::task::AtomicWaker;
 use futures_util::StreamExt;
-use parking_lot::Mutex;
 
 use crate::error::Payload;
 use crate::util::{OneshotCell, Uncontended};
@@ -54,7 +54,10 @@ where
     /// This puts it into a queue which will be drained later, once polling is
     /// done.
     pub fn spawn(&self, future: F) {
-        self.queue.lock().push_back(future);
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(future);
         self.waker.wake();
     }
 
@@ -92,7 +95,7 @@ where
 
         // We need to be careful not to hold the queue lock while polling exec since
         // then a task attempting to spawn another would cause a deadlock.
-        let mut queue = self.queue.lock();
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         let more = !queue.is_empty();
 
         exec.extend(queue.drain(..));

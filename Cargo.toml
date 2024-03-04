@@ -7,11 +7,9 @@ edition = "2021"
 stream = ["dep:futures-core"]
 
 [dependencies]
-concurrent-queue = "2.4.0"
 pin-project-lite = "0.2.13"
 
 futures-core = { version = "0.3.30", optional = true }
-parking_lot = "0.12.1"
 
 [dependencies.futures-util]
 version = "0.3.30"
