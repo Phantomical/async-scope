@@ -15,3 +15,12 @@ async fn assert_does_not_hang<F: Future>(future: F) -> F::Output {
         Err(_) => panic!("future timed out after 1s"),
     }
 }
+
+#[allow(dead_code)]
+const fn require_send<T: Send>() {}
+
+const _: () = {
+    require_send::<crate::JoinHandle<()>>();
+    require_send::<crate::AbortHandle>();
+    require_send::<crate::AsyncScope<()>>();
+};

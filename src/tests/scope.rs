@@ -6,7 +6,7 @@ use tokio::sync::Barrier;
 use tokio::task::yield_now;
 
 use super::assert_does_not_hang;
-use crate::{scope, ScopeHandle};
+use crate::ScopeHandle;
 
 fn assert_send<T: Send>() {}
 fn assert_sync<T: Sync>() {}

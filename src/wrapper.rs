@@ -4,13 +4,13 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
-use futures_util::task::{AtomicWaker, FutureObj};
+use futures_util::task::AtomicWaker;
 use pin_project_lite::pin_project;
 
 use crate::error::Payload;
 use crate::util::split_arc::Full;
 use crate::util::OneshotCell;
-use crate::{JoinHandle, ScopeHandle};
+use crate::{FutureObj, JoinHandle, ScopeHandle};
 
 pin_project! {
     pub(crate) struct WrapFuture<'scope, 'env, F: Future> {
@@ -56,7 +56,7 @@ where
     ) -> (FutureObj<'scope, ()>, JoinHandle<'scope, 'env, F::Output>) {
         let (future, handle) = Self::new(future, scope);
 
-        (FutureObj::from(Box::pin(future)), handle)
+        (Box::pin(future), handle)
     }
 }
 
