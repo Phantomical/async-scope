@@ -75,6 +75,10 @@ where
 /// whatsoever, such as communicating between different parts of the same future
 /// (or multiple tasks in the same `AsyncScope`).
 ///
+/// Note that it is technically possible to have tasks within an `AsyncScope`
+/// run in different threads (either via unsafe or via `std::thread::scope`) so
+/// this does actually need to be thread-safe.
+///
 /// As such, it is basically just a wrapper around a `VecDeque` behind a mutex.
 struct Channel<T> {
     data: Mutex<ChannelData<T>>,
