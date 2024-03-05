@@ -10,9 +10,9 @@ mod scope;
 mod stream;
 
 async fn assert_does_not_hang<F: Future>(future: F) -> F::Output {
-    match tokio::time::timeout(Duration::from_secs(1), future).await {
+    match tokio::time::timeout(Duration::from_secs(10), future).await {
         Ok(result) => result,
-        Err(_) => panic!("future timed out after 1s"),
+        Err(_) => panic!("future timed out after 10s"),
     }
 }
 

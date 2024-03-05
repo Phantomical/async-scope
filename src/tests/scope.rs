@@ -35,6 +35,7 @@ async fn tasks_run_in_parallel() {
 
 /// Same as above but with a large number of tasks.
 #[tokio::test]
+#[cfg_attr(miri, ignore = "test times out when run under miri")]
 async fn tasks_run_in_parallel_many() {
     let taskcount = 1024;
     let barrier = Barrier::new(taskcount);
