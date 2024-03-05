@@ -13,20 +13,20 @@ use crate::{JoinHandle, ScopeHandle};
 /// Stream for [`scope_spawn`].
 ///
 /// [`scope_spawn`]: super::ScopedStreamExt::scope_spawn
-pub struct Spawn<'scope, S>
+pub struct Spawn<'scope, 'env, S>
 where
     S: Stream,
 {
     channel: Arc<Channel<S::Item>>,
-    handle: JoinHandle<'scope, ()>,
+    handle: JoinHandle<'scope, 'env, ()>,
 }
 
-impl<'scope, S> Spawn<'scope, S>
+impl<'scope, 'env, S> Spawn<'scope, 'env, S>
 where
     S: Stream + Send + 'scope,
     S::Item: Send + 'scope,
 {
-    pub(crate) fn new(stream: S, limit: usize, scope: &ScopeHandle<'scope>) -> Self {
+    pub(crate) fn new(stream: S, limit: usize, scope: ScopeHandle<'scope, 'env>) -> Self {
         let channel = Arc::new(Channel::new(limit));
         let handle = scope.spawn({
             let channel = channel.clone();
@@ -37,7 +37,7 @@ where
     }
 }
 
-impl<'scope, S> Stream for Spawn<'scope, S>
+impl<'scope, 'env, S> Stream for Spawn<'scope, 'env, S>
 where
     S: Stream + Send + 'scope,
     S::Item: Send + 'scope,
@@ -60,7 +60,7 @@ where
     }
 }
 
-impl<'scope, S> Drop for Spawn<'scope, S>
+impl<'scope, 'env, S> Drop for Spawn<'scope, 'env, S>
 where
     S: Stream,
 {
@@ -74,6 +74,10 @@ where
 /// It is designed to be used under cases where there is no contention
 /// whatsoever, such as communicating between different parts of the same future
 /// (or multiple tasks in the same `AsyncScope`).
+///
+/// Note that it is technically possible to have tasks within an `AsyncScope`
+/// run in different threads (either via unsafe or via `std::thread::scope`) so
+/// this does actually need to be thread-safe.
 ///
 /// As such, it is basically just a wrapper around a `VecDeque` behind a mutex.
 struct Channel<T> {

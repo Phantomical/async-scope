@@ -12,7 +12,7 @@ pin_project! {
     /// Stream for [`scope_buffer_unordered`][0].
     ///
     /// [0]: super::ScopedStreamExt::scope_buffer_unordered
-    pub struct BufferUnordered<'scope, S>
+    pub struct BufferUnordered<'scope, 'env, S>
     where
         S: Stream,
         S::Item: Future,
@@ -20,13 +20,13 @@ pin_project! {
         #[pin]
         stream: S,
         limit: usize,
-        queue: FuturesUnordered<JoinHandle<'scope, <S::Item as Future>::Output>>,
+        queue: FuturesUnordered<JoinHandle<'scope, 'env, <S::Item as Future>::Output>>,
 
         // scope = None means that the stream has been polled to completion
-        scope: Option<ScopeHandle<'scope>>,
+        scope: Option<ScopeHandle<'scope, 'env>>,
     }
 
-    impl<'scope, S> PinnedDrop for BufferUnordered<'scope, S>
+    impl<'scope, 'env, S> PinnedDrop for BufferUnordered<'scope, 'env, S>
     where
         S: Stream,
         S::Item: Future
@@ -43,18 +43,18 @@ pin_project! {
     }
 }
 
-impl<'scope, S> BufferUnordered<'scope, S>
+impl<'scope, 'env, S> BufferUnordered<'scope, 'env, S>
 where
     S: Stream,
     S::Item: Future + Send + 'scope,
     <S::Item as Future>::Output: Send + 'scope,
 {
-    pub(crate) fn new(stream: S, n: usize, scope: &ScopeHandle<'scope>) -> Self {
+    pub(crate) fn new(stream: S, n: usize, scope: ScopeHandle<'scope, 'env>) -> Self {
         BufferUnordered {
             stream,
             limit: n,
             queue: FuturesUnordered::new(),
-            scope: Some(scope.clone()),
+            scope: Some(scope),
         }
     }
 
@@ -83,7 +83,7 @@ where
     }
 }
 
-impl<'scope, S> Stream for BufferUnordered<'scope, S>
+impl<'scope, 'env, S> Stream for BufferUnordered<'scope, 'env, S>
 where
     S: Stream,
     S::Item: Future + Send + 'scope,
@@ -94,7 +94,7 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
 
-        if let Some(scope) = this.scope.as_ref() {
+        if let Some(scope) = this.scope {
             while this.queue.len() < *this.limit {
                 match this.stream.as_mut().poll_next(cx) {
                     Poll::Ready(Some(future)) => this.queue.push(scope.spawn(future)),
@@ -129,7 +129,7 @@ where
     }
 }
 
-impl<'scope, S> FusedStream for BufferUnordered<'scope, S>
+impl<'scope, 'env, S> FusedStream for BufferUnordered<'scope, 'env, S>
 where
     S: Stream,
     S::Item: Future + Send + 'scope,
@@ -161,7 +161,7 @@ mod tests {
             let (tx1, rx1) = oneshot::channel();
             let (tx2, rx2) = oneshot::channel();
 
-            let mut stream = pin!(stream::iter(vec![rx1, rx2]).scope_buffer_unordered(2, &scope));
+            let mut stream = pin!(stream::iter(vec![rx1, rx2]).scope_buffer_unordered(2, scope));
 
             // Futures can resolve out of order.
             tx2.send(1).unwrap();
@@ -186,7 +186,7 @@ mod tests {
             let (tx3, rx3) = oneshot::channel();
 
             let mut stream =
-                pin!(stream::iter(vec![rx1, rx2, rx3]).scope_buffer_unordered(2, &scope));
+                pin!(stream::iter(vec![rx1, rx2, rx3]).scope_buffer_unordered(2, scope));
 
             // rx3 is outside of the buffer so it should not resolve
             tx3.send(1).unwrap();
@@ -229,7 +229,7 @@ mod tests {
 
             // These tasks need to be run concurrently to complete.
             let tasks = vec![pingpong(tx1, rx2, true), pingpong(tx2, rx1, false)];
-            let mut stream = pin!(stream::iter(tasks).scope_buffer_unordered(2, &scope));
+            let mut stream = pin!(stream::iter(tasks).scope_buffer_unordered(2, scope));
 
             assert_matches!(resolve(stream.next()).await, Some(Some(_)));
             assert_matches!(resolve(stream.next()).await, Some(Some(_)));

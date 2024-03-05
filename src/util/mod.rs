@@ -9,6 +9,9 @@ pub mod split_arc;
 mod sync;
 #[cfg(test)]
 pub mod test;
+mod uncontended;
+pub mod variance;
 
 pub(crate) use self::cell::OneshotCell;
 pub(crate) use self::sync::SyncWrapper;
+pub(crate) use self::uncontended::Uncontended;

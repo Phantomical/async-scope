@@ -6,7 +6,16 @@ use tokio::sync::Barrier;
 use tokio::task::yield_now;
 
 use super::assert_does_not_hang;
-use crate::{scope, ScopeHandle};
+use crate::ScopeHandle;
+
+fn assert_send<T: Send>() {}
+fn assert_sync<T: Sync>() {}
+
+#[test]
+fn require_send_sync() {
+    assert_send::<crate::AsyncScope<()>>();
+    assert_sync::<crate::AsyncScope<()>>();
+}
 
 /// This test ensures that the spawned tests are actually run in parallel.
 #[tokio::test]
@@ -26,6 +35,7 @@ async fn tasks_run_in_parallel() {
 
 /// Same as above but with a large number of tasks.
 #[tokio::test]
+#[cfg_attr(miri, ignore = "test times out when run under miri")]
 async fn tasks_run_in_parallel_many() {
     let taskcount = 1024;
     let barrier = Barrier::new(taskcount);
@@ -59,15 +69,13 @@ async fn spawn_immediate() {
 /// when it is spawned.
 #[tokio::test]
 async fn spawn_late() {
-    fn mktask<'scope, F>(
-        scope: &ScopeHandle<'scope>,
+    fn mktask<'scope: 'env, 'env, F>(
+        scope: ScopeHandle<'scope, 'env>,
         inner: F,
     ) -> impl Future<Output = ()> + Send + 'scope
     where
         F: Future<Output = ()> + Send + 'scope,
     {
-        let scope = scope.clone();
-
         async move {
             scope.spawn(inner);
         }
@@ -75,13 +83,13 @@ async fn spawn_late() {
 
     let scope = scope!(|scope| {
         let task = async {};
-        let task = mktask(&scope, task);
-        let task = mktask(&scope, task);
-        let task = mktask(&scope, task);
-        let task = mktask(&scope, task);
-        let task = mktask(&scope, task);
-        let task = mktask(&scope, task);
-        let task = mktask(&scope, task);
+        let task = mktask(scope, task);
+        let task = mktask(scope, task);
+        let task = mktask(scope, task);
+        let task = mktask(scope, task);
+        let task = mktask(scope, task);
+        let task = mktask(scope, task);
+        let task = mktask(scope, task);
 
         scope.spawn(task);
     });
@@ -214,4 +222,22 @@ async fn unhandled_subtask_panic_propagates_payload() {
         .expect_err("scope did not panic");
 
     assert!(error.is::<DummyPanic>());
+}
+
+#[tokio::test]
+async fn return_borrowed_data() {
+    let a = 0;
+    let b = 1;
+
+    let scope = scope!(|scope| {
+        let a = scope.spawn(async { &a });
+        let b = scope.spawn(async { &b });
+
+        let a = a.await.unwrap();
+        let b = b.await.unwrap();
+
+        assert_ne!(a, b);
+    });
+
+    scope.await;
 }

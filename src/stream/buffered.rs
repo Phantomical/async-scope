@@ -12,7 +12,7 @@ pin_project! {
     /// Stream for [`scope_buffered`].
     ///
     /// [`scope_buffered`]: super::ScopedStreamExt::scope_buffered
-    pub struct Buffered<'scope, S>
+    pub struct Buffered<'scope, 'env, S>
     where
         S: Stream,
         S::Item: Future,
@@ -20,13 +20,13 @@ pin_project! {
         #[pin]
         stream: S,
         limit: usize,
-        queue: VecDeque<JoinHandle<'scope, <S::Item as Future>::Output>>,
+        queue: VecDeque<JoinHandle<'scope, 'env, <S::Item as Future>::Output>>,
 
         // scope = None means that the stream has been polled to completion
-        scope: Option<ScopeHandle<'scope>>,
+        scope: Option<ScopeHandle<'scope, 'env>>,
     }
 
-    impl<'scope, S> PinnedDrop for Buffered<'scope, S>
+    impl<'scope, 'env, S> PinnedDrop for Buffered<'scope, 'env, S>
     where
         S: Stream,
         S::Item: Future,
@@ -41,18 +41,18 @@ pin_project! {
     }
 }
 
-impl<'scope, S> Buffered<'scope, S>
+impl<'scope, 'env, S> Buffered<'scope, 'env, S>
 where
     S: Stream,
     S::Item: Future + Send + 'scope,
     <S::Item as Future>::Output: Send + 'scope,
 {
-    pub(crate) fn new(stream: S, n: usize, scope: &ScopeHandle<'scope>) -> Self {
+    pub(crate) fn new(stream: S, n: usize, scope: ScopeHandle<'scope, 'env>) -> Self {
         Buffered {
             stream,
             limit: n,
             queue: VecDeque::with_capacity(n),
-            scope: Some(scope.clone()),
+            scope: Some(scope),
         }
     }
 
@@ -81,7 +81,7 @@ where
     }
 }
 
-impl<'scope, S> Stream for Buffered<'scope, S>
+impl<'scope, 'env, S> Stream for Buffered<'scope, 'env, S>
 where
     S: Stream,
     S::Item: Future + Send + 'scope,
@@ -137,7 +137,7 @@ where
     }
 }
 
-impl<'scope, S> FusedStream for Buffered<'scope, S>
+impl<'scope, 'env, S> FusedStream for Buffered<'scope, 'env, S>
 where
     S: Stream,
     S::Item: Future + Send + 'scope,
@@ -167,7 +167,7 @@ mod tests {
             let (tx1, rx1) = oneshot::channel();
             let (tx2, rx2) = oneshot::channel();
 
-            let mut stream = pin!(stream::iter(vec![rx1, rx2]).scope_buffered(2, &scope));
+            let mut stream = pin!(stream::iter(vec![rx1, rx2]).scope_buffered(2, scope));
 
             tx2.send(1).unwrap();
 
@@ -205,7 +205,7 @@ mod tests {
 
             // These tasks need to be run concurrently to complete.
             let tasks = vec![pingpong(tx1, rx2, true), pingpong(tx2, rx1, false)];
-            let mut stream = pin!(stream::iter(tasks).scope_buffered(2, &scope));
+            let mut stream = pin!(stream::iter(tasks).scope_buffered(2, scope));
 
             assert_matches!(resolve(stream.next()).await, Some(Some(_)));
             assert_matches!(resolve(stream.next()).await, Some(Some(_)));

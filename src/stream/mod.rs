@@ -116,7 +116,11 @@ pub trait ScopedStreamExt: Stream {
     /// If a task panics but the stream is dropped before its output would have
     /// been returned then that will count as an unhandled panic to the outer
     /// [`AsyncScope`] and it will panic on scope exit.
-    fn scope_buffered<'scope>(self, n: usize, scope: &ScopeHandle<'scope>) -> Buffered<'scope, Self>
+    fn scope_buffered<'scope, 'env>(
+        self,
+        n: usize,
+        scope: ScopeHandle<'scope, 'env>,
+    ) -> Buffered<'scope, 'env, Self>
     where
         Self: Sized,
         Self::Item: Future + Send + 'scope,
@@ -170,11 +174,11 @@ pub trait ScopedStreamExt: Stream {
     /// .await
     /// # }
     /// ```
-    fn scope_buffer_unordered<'scope>(
+    fn scope_buffer_unordered<'scope, 'env>(
         self,
         n: usize,
-        scope: &ScopeHandle<'scope>,
-    ) -> BufferUnordered<'scope, Self>
+        scope: ScopeHandle<'scope, 'env>,
+    ) -> BufferUnordered<'scope, 'env, Self>
     where
         Self: Sized,
         Self::Item: Future + Send + 'scope,
@@ -205,7 +209,11 @@ pub trait ScopedStreamExt: Stream {
     ///
     /// [0]: ScopedStreamExt::scope_buffered
     /// [1]: ScopedStreamExt::scope_buffer_unordered
-    fn scope_spawn<'scope>(self, buffer: usize, scope: &ScopeHandle<'scope>) -> Spawn<'scope, Self>
+    fn scope_spawn<'scope, 'env>(
+        self,
+        buffer: usize,
+        scope: ScopeHandle<'scope, 'env>,
+    ) -> Spawn<'scope, 'env, Self>
     where
         Self: Send + Sized + 'scope,
         Self::Item: Send + 'scope,

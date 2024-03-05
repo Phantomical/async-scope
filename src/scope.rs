@@ -1,89 +1,83 @@
 use std::future::Future;
-use std::marker::PhantomData;
-use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use crate::error::Payload;
-use crate::executor::{self, Executor};
-use crate::util::complete::RequirePending;
-use crate::util::split_arc::{Full, Partial};
+use crate::executor::Executor;
+use crate::util::variance::{Covariant, Invariant};
 use crate::util::OneshotCell;
-use crate::wrapper::{TaskAbortHandle, WrapFuture};
-use crate::{scope, JoinError};
+use crate::wrapper::WrapFuture;
+use crate::{FutureObj, JoinHandle};
 
-used_in_docs!(scope);
-
-/// A collection of tasks that are run together.
-///
-/// This type is returned by the [`scope!`] macro. If you already have an
-/// existing async function then you can use [`AsyncScope::new`] instead.
-pub struct AsyncScope<'a, T> {
-    executor: Executor<'a>,
-    main: JoinHandle<'a, T>,
-    cancel_remaining_tasks_on_exit: bool,
+pub(crate) struct ScopeExecutor<'env> {
+    executor: Executor<FutureObj<'env, ()>>,
+    panic: OneshotCell<Payload>,
 }
 
-impl<'a, T> AsyncScope<'a, T> {
-    /// Create a new `AsyncScope` from a function that takes a [`ScopeHandle`]
-    /// and returns a future.
-    ///
-    /// Usually you want to use [`scope!`] instead. It handles some footguns
-    /// around borrowing.
-    pub fn new<F, Fut>(func: F) -> Self
-    where
-        F: FnOnce(ScopeHandle<'a>) -> Fut,
-        Fut: Future<Output = T> + Send + 'a,
-        T: Send,
-    {
-        let mut executor = Executor::new();
-
-        let future = func(ScopeHandle::new(executor.handle()));
-        let (future, handle) = WrapFuture::new(future, executor.unhandled_panic_flag());
-
-        executor.spawn(Box::pin(future));
-
+impl<'env> ScopeExecutor<'env> {
+    pub fn new() -> Self {
         Self {
-            executor,
-            main: handle,
-            cancel_remaining_tasks_on_exit: false,
+            executor: Executor::new(),
+            panic: OneshotCell::new(),
         }
     }
 
-    /// Configure whether remaining tasks should be polled to completion after
-    /// the main scope task exits or just dropped.
-    ///
-    /// By default, whatever tasks are left in the [`AsyncScope`] continue to
-    /// run until all tasks within have been polled to completion. This matches
-    /// the existing behaviour of [`std::thread::scope`].
-    ///
-    /// Setting this to `true` means that once the initial scope task (i.e. the
-    /// one passed in to [`scope!`]) completes then all other tasks will be
-    /// dropped without them being polled to completion.
-    pub fn cancel_remaining_tasks_on_exit(&mut self, enabled: bool) {
-        self.cancel_remaining_tasks_on_exit = enabled;
+    pub fn unhandled_panic(&self) -> Option<Payload> {
+        self.panic.take().ok()
     }
-}
 
-impl<'a, R> Future for AsyncScope<'a, R> {
-    type Output = R;
+    pub fn set_unhandled_panic(&self, payload: Payload) {
+        let _ = self.panic.store(payload);
+    }
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.executor.poll(cx) {
-            Poll::Pending if !self.cancel_remaining_tasks_on_exit => return Poll::Pending,
-            _ => (),
-        }
+    pub fn spawn_direct(&self, future: FutureObj<'env, ()>) {
+        self.executor.spawn_direct(future);
+    }
 
-        match Pin::new(&mut self.main).poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok(value)) => match self.executor.unhandled_panic() {
-                Some(payload) => std::panic::resume_unwind(payload),
-                None => Poll::Ready(value),
-            },
-            Poll::Ready(Err(e)) => match e.try_into_panic() {
-                Ok(payload) => std::panic::resume_unwind(payload),
-                Err(_) => unreachable!("main async scope task was cancelled"),
-            },
-        }
+    pub fn spawn(&self, future: FutureObj<'env, ()>) {
+        self.executor.spawn(future);
+    }
+
+    pub fn clear(&self) {
+        self.executor.clear()
+    }
+
+    /// Create a [`ScopeHandle`] for this `ScopeExecutor`.
+    ///
+    /// The returned [`ScopeHandle`] has an arbitrary lifetime because what it
+    /// really refers to is the lifetime of the `ScopeExecutor` stored within.
+    /// It is not possible to name this lifetime since it is ultimately
+    /// determined by runtime behaviour.
+    ///
+    /// This function effectively creates another reference to the Arc without
+    /// incrementing its reference count.
+    ///
+    /// # Safety
+    /// The `'scope` lifetime of the reference returned by this function _must_
+    /// end before any mutable reference is made to the `ScopeExecutor` value
+    /// stored within the `Arc`. If not upheld then there may be concurrent
+    /// mutable and immutable borrows on the executor.
+    ///
+    /// Generally the way to do this is to call [`clear`] before the
+    /// `ScopeExecutor` is dropped.
+    ///
+    /// [`clear`]: ScopeExecutor::clear
+    pub unsafe fn handle<'scope>(self: &Arc<Self>) -> ScopeHandle<'scope, 'env>
+    where
+        'env: 'scope,
+    {
+        // Get dereferences out of the way first.
+        let this: &Self = self;
+
+        // SAFETY: The caller guarantees that the resulting reference will not outlive
+        //         the scope itself.
+        let this = unsafe { &*(this as *const Self) };
+
+        ScopeHandle::new(this)
+    }
+
+    pub fn poll(&self, cx: &mut Context<'_>) -> Poll<()> {
+        self.executor.poll(cx)
     }
 }
 
@@ -92,14 +86,67 @@ impl<'a, R> Future for AsyncScope<'a, R> {
 /// This is provided to the closure passed to the [`scope!`] macro.
 ///
 /// See the [crate] docs for details.
-#[derive(Clone)]
-pub struct ScopeHandle<'a> {
-    handle: executor::Handle<'a>,
+#[derive(Copy, Clone)]
+pub struct ScopeHandle<'scope, 'env: 'scope> {
+    executor: &'scope ScopeExecutor<'scope>,
+
+    /// 'env represents the external environment.
+    ///
+    /// It needs to outlive 'scope but as long as that remains true we can
+    /// shorten it arbitrarily.
+    ///
+    /// This makes it covariant.
+    ///
+    /// ScopeExecutor is invariant over 'env. On its own this is fine, but since
+    /// a scope handle is used within a self-referential borrow rust's
+    /// variance inference can't infer the right variance.
+    _env: Covariant<'env>,
+
+    /// 'scope needs to be invariant.
+    ///
+    /// Allowing 'scope to be shortened would allow borrowing values within the
+    /// scope. Allowing the code below is clearly invalid.
+    /// ```text
+    /// scope!(|scope| {
+    ///     let a = ();
+    ///
+    ///     scope.spawn(async { println!("{}", a) });
+    /// })
+    /// ```
+    ///
+    /// Allowing 'scope to be extended would allow extending the lifetime beyond
+    /// the end of the scope, which would allow you to return the ScopeHandle.
+    /// Since the handle holds a reference to internal state of the scope this
+    /// is also clearly invalid.
+    ///
+    /// So 'scope needs to be invariant.
+    _scope: Invariant<'scope>,
 }
 
-impl<'a> ScopeHandle<'a> {
-    fn new(handle: executor::Handle<'a>) -> Self {
-        Self { handle }
+impl<'scope, 'env: 'scope> ScopeHandle<'scope, 'env> {
+    fn new(executor: &'scope ScopeExecutor<'env>) -> Self {
+        // # Safety
+        // This closes the loop and makes the `ScopeExecutor` lifetime accurate.
+        // Note that `'env` is outlives `'scope`.
+        //
+        // Externally, the `ScopeExecutor` has the `'env` lifetime since there is no
+        // other available lifetime (besides `'static`, which is even less accurate).
+        // However, 'scope is really self-referential since it contains references to
+        // itself via `ScopeHandle` instances.
+        //
+        // The executor API ensures that no reference to data contained within the
+        // executor is allowed to escape so this is safe.
+        //
+        // See the documentation on `_scope` and `_env` to see why the lifetimes are the
+        // way they are.
+        let executor: &'scope ScopeExecutor<'scope> =
+            unsafe { &*(executor as *const ScopeExecutor<'env> as *const _) };
+
+        Self {
+            executor,
+            _env: Covariant::new(),
+            _scope: Invariant::new(),
+        }
     }
 
     /// Spawn a new task within the scope, returning a [`JoinHandle`] to it.
@@ -121,136 +168,17 @@ impl<'a> ScopeHandle<'a> {
     ///
     /// If the [`JoinHandle`] outlives the scope and is then dropped, then the
     /// panic will be lost.
-    pub fn spawn<F>(&self, future: F) -> JoinHandle<'a, F::Output>
+    pub fn spawn<F>(&self, future: F) -> JoinHandle<'scope, 'env, F::Output>
     where
-        F: Future + Send + 'a,
-        F::Output: Send,
+        F: Future + Send + 'scope,
+        F::Output: Send + 'scope,
     {
-        let (future, handle) = WrapFuture::new(future, self.handle.unhandled_panic_flag());
-        self.handle.spawn(Box::pin(future));
+        let (future, handle) = WrapFuture::new_send(future, *self);
+        self.executor.spawn(future);
         handle
     }
-}
 
-/// An owned permission to join a scoped task (await its termination).
-///
-/// This can be thought of as an equivalent to [`std::thread::ScopedJoinHandle`]
-/// for a scoped task. Note that the scoped task associated with this
-/// `JoinHandle` started running immediately once you called `spawn`, even if
-/// the [`JoinHandle`] has not been awaited yet.
-pub struct JoinHandle<'a, T> {
-    handle: Full<TaskAbortHandle, OneshotCell<Result<T, Payload>>>,
-    _marker: PhantomData<&'a ()>,
-
-    /// In debug mode we check to ensure that we aren't polled once the future
-    /// is complete.
-    check: RequirePending,
-}
-
-impl<'a, T> JoinHandle<'a, T> {
-    pub(crate) fn new(handle: Full<TaskAbortHandle, OneshotCell<Result<T, Payload>>>) -> Self {
-        Self {
-            handle,
-            check: RequirePending::new(),
-            _marker: PhantomData,
-        }
+    pub(crate) fn mark_unhandled_panic(&self, payload: Payload) {
+        self.executor.set_unhandled_panic(payload);
     }
-
-    /// Abort the task associated with the handle.
-    ///
-    /// Awaiting a cancelled task might complete as usual if the task was
-    /// already completed at the time it was cancelled, but most likely it will
-    /// fail with a [`cancelled`] [`JoinError`].
-    ///
-    /// If the task was already cancelled (e.g. by a previous call to `abort`)
-    /// then this method will do nothing.
-    ///
-    /// [`cancelled`]: JoinError::is_cancelled
-    pub fn abort(&self) {
-        self.handle.abort();
-    }
-
-    /// Get an [`AbortHandle`] for this task.
-    pub fn abort_handle(&self) -> AbortHandle {
-        AbortHandle(Full::downgrade(&self.handle))
-    }
-
-    /// Whether the task has exited.
-    pub fn is_finished(&self) -> bool {
-        Full::value(&self.handle).is_complete()
-    }
-}
-
-impl<'a, T> Future for JoinHandle<'a, T> {
-    type Output = Result<T, JoinError>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        debug_assert!(
-            !self.check.is_ready(),
-            "polled a JoinHandle that had already completed"
-        );
-
-        let result = match Full::value(&self.handle).poll_take(cx) {
-            Poll::Ready(result) => result,
-            Poll::Pending => return Poll::Pending,
-        };
-
-        self.check.set_ready();
-
-        Poll::Ready(match result {
-            Some(Ok(value)) => Ok(value),
-            Some(Err(payload)) => Err(JoinError::panicked(payload)),
-            None => Err(JoinError::cancelled()),
-        })
-    }
-}
-
-impl<'a, T> Unpin for JoinHandle<'a, T> {}
-
-impl<'a, T> Drop for JoinHandle<'a, T> {
-    fn drop(&mut self) {
-        let cell = Full::value(&self.handle);
-        cell.close();
-
-        if let Ok(Err(payload)) = cell.take() {
-            self.handle.mark_unhandled_panic(payload);
-        }
-    }
-}
-
-/// An owned permission to abort a spawned task, without awaiting its
-/// copmletion.
-///
-/// Unlike a [`JoinHandle`], an `AbortHandle` does not allow you to await the
-/// task's completion, only to abort it.
-#[derive(Clone)]
-pub struct AbortHandle(Partial<TaskAbortHandle>);
-
-impl AbortHandle {
-    /// Abort the task associated with the handle.
-    ///
-    /// Awaiting a cancelled task might complete as usual if the task was
-    /// already completed at the time it was cancelled, but most likely it will
-    /// fail with a [`cancelled`] [`JoinError`].
-    ///
-    /// If the task was already cancelled (e.g. by a previous call to `abort`)
-    /// then this method will do nothing.
-    ///
-    /// [`cancelled`]: JoinError::is_cancelled
-    pub fn abort(&self) {
-        self.0.abort()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[allow(dead_code)]
-    const fn require_send<T: Send>() {}
-
-    const _: () = {
-        require_send::<JoinHandle<()>>();
-        require_send::<AbortHandle>();
-    };
 }
