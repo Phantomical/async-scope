@@ -3,7 +3,7 @@
 //! This crate allows you to write futures that use `spawn` but also borrow data
 //! from the current function. It does this by running those futures in a local
 //! executor within the current task.
-//! 
+//!
 //! ---
 //!
 //! To do this, declare a new scope using the [`scope!`] macro
@@ -46,8 +46,8 @@
 //!   is left unspecified.
 //!
 //! # Features
-//! - `stream` - Enables the `stream` module and the `ScopedStreamExt`
-//!   extension trait.
+//! - `stream` - Enables the `stream` module and the `ScopedStreamExt` extension
+//!   trait.
 
 /// Helper macro used to silence `unused_import` warnings when an item is
 /// only imported in order to refer to it within a doc comment.
