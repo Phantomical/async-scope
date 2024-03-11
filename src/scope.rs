@@ -1,33 +1,34 @@
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use crate::error::Payload;
 use crate::executor::Executor;
 use crate::util::variance::{Covariant, Invariant};
-use crate::util::OneshotCell;
 use crate::wrapper::WrapFuture;
 use crate::{FutureObj, JoinHandle};
 
 pub(crate) struct ScopeExecutor<'env> {
     executor: Executor<FutureObj<'env, ()>>,
-    panic: OneshotCell<Payload>,
+    panic: Mutex<Option<Payload>>,
 }
 
 impl<'env> ScopeExecutor<'env> {
     pub fn new() -> Self {
         Self {
             executor: Executor::new(),
-            panic: OneshotCell::new(),
+            panic: Mutex::new(None),
         }
     }
 
     pub fn unhandled_panic(&self) -> Option<Payload> {
-        self.panic.take().ok()
+        let mut panic = self.panic.lock().unwrap_or_else(|e| e.into_inner());
+        panic.take()
     }
 
     pub fn set_unhandled_panic(&self, payload: Payload) {
-        let _ = self.panic.store(payload);
+        let mut panic = self.panic.lock().unwrap_or_else(|e| e.into_inner());
+        panic.get_or_insert(payload);
     }
 
     pub fn spawn_direct(&self, future: FutureObj<'env, ()>) {
@@ -62,16 +63,13 @@ impl<'env> ScopeExecutor<'env> {
     /// `ScopeExecutor` is dropped.
     ///
     /// [`clear`]: ScopeExecutor::clear
-    pub unsafe fn handle<'scope>(self: &Arc<Self>) -> ScopeHandle<'scope, 'env>
+    pub unsafe fn handle<'scope>(&self) -> ScopeHandle<'scope, 'env>
     where
         'env: 'scope,
     {
-        // Get dereferences out of the way first.
-        let this: &Self = self;
-
         // SAFETY: The caller guarantees that the resulting reference will not outlive
         //         the scope itself.
-        let this = unsafe { &*(this as *const Self) };
+        let this = unsafe { &*(self as *const Self) };
 
         ScopeHandle::new(this)
     }
