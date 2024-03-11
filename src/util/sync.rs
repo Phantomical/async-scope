@@ -4,8 +4,7 @@ pub(crate) struct SyncWrapper<T>(T);
 
 // SAFETY: SyncWrapper disallows immutable access to T so moving an immutable
 //         reference to SyncWrapper across threads is safe.
-#[allow(unsafe_code)]
-unsafe impl<T: Sync> Send for SyncWrapper<T> {}
+unsafe impl<T: Send> Sync for SyncWrapper<T> {}
 
 impl<T> SyncWrapper<T> {
     pub fn new(value: T) -> Self {
