@@ -2,14 +2,14 @@ use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use futures_channel::oneshot;
 use futures_util::task::AtomicWaker;
 use pin_project_lite::pin_project;
 
 use crate::error::Payload;
-use crate::util::split_arc::Full;
-use crate::util::OneshotCell;
 use crate::{FutureObj, JoinHandle, ScopeHandle};
 
 pin_project! {
@@ -17,7 +17,9 @@ pin_project! {
         #[pin]
         future: F,
         scope: ScopeHandle<'scope, 'env>,
-        shared: Full<TaskAbortHandle, OneshotCell<Result<F::Output, Payload>>>,
+
+        handle: Arc<TaskAbortHandle>,
+        result: Option<oneshot::Sender<Result<F::Output, Payload>>>,
     }
 }
 
@@ -26,21 +28,20 @@ impl<'scope, 'env, F: Future> WrapFuture<'scope, 'env, F> {
         future: F,
         scope: ScopeHandle<'scope, 'env>,
     ) -> (Self, JoinHandle<'scope, 'env, F::Output>) {
-        let abort = Full::new(
-            TaskAbortHandle {
-                cancelled: AtomicBool::new(false),
-                waker: AtomicWaker::new(),
-            },
-            OneshotCell::new(),
-        );
+        let (tx, rx) = oneshot::channel();
+        let abort = Arc::new(TaskAbortHandle {
+            cancelled: AtomicBool::new(false),
+            waker: AtomicWaker::new(),
+        });
 
         (
             Self {
                 future,
                 scope,
-                shared: abort.clone(),
+                handle: abort.clone(),
+                result: Some(tx),
             },
-            JoinHandle::new(scope, abort),
+            JoinHandle::new(scope, abort, rx),
         )
     }
 }
@@ -65,15 +66,11 @@ impl<'scope, 'env, F: Future> Future for WrapFuture<'scope, 'env, F> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        let shared = &*this.shared;
+        this.handle.waker.register(cx.waker());
 
-        shared.waker.register(cx.waker());
-
-        let cancelled = this.shared.cancelled.load(Ordering::Relaxed);
-        let cell = Full::value(shared);
-
+        let cancelled = this.handle.cancelled.load(Ordering::Relaxed);
         if cancelled {
-            cell.close();
+            *this.result = None;
             return Poll::Ready(());
         }
 
@@ -83,7 +80,12 @@ impl<'scope, 'env, F: Future> Future for WrapFuture<'scope, 'env, F> {
             Err(payload) => Err(payload),
         };
 
-        if let Err(Err(payload)) = cell.store(result) {
+        let channel = match this.result.take() {
+            Some(channel) => channel,
+            None => panic!("Wrapper polled after returning Ready"),
+        };
+
+        if let Err(Err(payload)) = channel.send(result) {
             this.scope.mark_unhandled_panic(payload);
         }
 

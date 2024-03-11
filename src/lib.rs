@@ -41,6 +41,8 @@ macro_rules! used_in_docs {
     };
 }
 
+use futures_channel::oneshot;
+
 pub use crate::error::JoinError;
 pub use crate::scope::ScopeHandle;
 
@@ -61,8 +63,6 @@ use std::task::{Context, Poll};
 use crate::error::Payload;
 use crate::scope::ScopeExecutor;
 use crate::util::complete::RequirePending;
-use crate::util::split_arc::{Full, Partial};
-use crate::util::OneshotCell;
 use crate::wrapper::{TaskAbortHandle, WrapFuture};
 
 /// Create a new scope for spawning scoped tasks.
@@ -278,7 +278,8 @@ impl<'env, T> Drop for AsyncScope<'env, T> {
 /// the [`JoinHandle`] has not been awaited yet.
 pub struct JoinHandle<'scope, 'env, T> {
     scope: ScopeHandle<'scope, 'env>,
-    handle: Full<TaskAbortHandle, OneshotCell<Result<T, Payload>>>,
+    handle: Arc<TaskAbortHandle>,
+    result: oneshot::Receiver<Result<T, Payload>>,
 
     /// In debug mode we check to ensure that we aren't polled once the future
     /// is complete.
@@ -288,11 +289,13 @@ pub struct JoinHandle<'scope, 'env, T> {
 impl<'scope, 'env, T> JoinHandle<'scope, 'env, T> {
     pub(crate) fn new(
         scope: ScopeHandle<'scope, 'env>,
-        handle: Full<TaskAbortHandle, OneshotCell<Result<T, Payload>>>,
+        handle: Arc<TaskAbortHandle>,
+        result: oneshot::Receiver<Result<T, Payload>>,
     ) -> Self {
         Self {
             scope,
             handle,
+            result,
             check: RequirePending::new(),
         }
     }
@@ -313,12 +316,7 @@ impl<'scope, 'env, T> JoinHandle<'scope, 'env, T> {
 
     /// Get an [`AbortHandle`] for this task.
     pub fn abort_handle(&self) -> AbortHandle {
-        AbortHandle(Full::downgrade(&self.handle))
-    }
-
-    /// Whether the task has exited.
-    pub fn is_finished(&self) -> bool {
-        Full::value(&self.handle).is_complete()
+        AbortHandle(self.handle.clone())
     }
 }
 
@@ -331,7 +329,7 @@ impl<'scope, 'env, T> Future for JoinHandle<'scope, 'env, T> {
             "polled a JoinHandle that had already completed"
         );
 
-        let result = match Full::value(&self.handle).poll_take(cx) {
+        let result = match Pin::new(&mut self.result).poll(cx) {
             Poll::Ready(result) => result,
             Poll::Pending => return Poll::Pending,
         };
@@ -339,9 +337,9 @@ impl<'scope, 'env, T> Future for JoinHandle<'scope, 'env, T> {
         self.check.set_ready();
 
         Poll::Ready(match result {
-            Some(Ok(value)) => Ok(value),
-            Some(Err(payload)) => Err(JoinError::panicked(payload)),
-            None => Err(JoinError::cancelled()),
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(payload)) => Err(JoinError::panicked(payload)),
+            Err(_) => Err(JoinError::cancelled()),
         })
     }
 }
@@ -350,10 +348,9 @@ impl<'scope, 'env, T> Unpin for JoinHandle<'scope, 'env, T> {}
 
 impl<'scope, 'env, T> Drop for JoinHandle<'scope, 'env, T> {
     fn drop(&mut self) {
-        let cell = Full::value(&self.handle);
-        cell.close();
+        self.result.close();
 
-        if let Ok(Err(payload)) = cell.take() {
+        if let Ok(Some(Err(payload))) = self.result.try_recv() {
             self.scope.mark_unhandled_panic(payload);
         }
     }
@@ -365,7 +362,7 @@ impl<'scope, 'env, T> Drop for JoinHandle<'scope, 'env, T> {
 /// Unlike a [`JoinHandle`], an `AbortHandle` does not allow you to await the
 /// task's completion, only to abort it.
 #[derive(Clone)]
-pub struct AbortHandle(Partial<TaskAbortHandle>);
+pub struct AbortHandle(Arc<TaskAbortHandle>);
 
 impl AbortHandle {
     /// Abort the task associated with the handle.
