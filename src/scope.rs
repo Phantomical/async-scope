@@ -6,7 +6,9 @@ use crate::error::Payload;
 use crate::executor::Executor;
 use crate::util::variance::{Covariant, Invariant};
 use crate::wrapper::WrapFuture;
-use crate::{FutureObj, JoinHandle};
+use crate::{scope, AsyncScope, FutureObj, JoinHandle};
+
+used_in_docs!(AsyncScope, scope);
 
 pub(crate) struct ScopeExecutor<'env> {
     executor: Executor<FutureObj<'env, ()>>,

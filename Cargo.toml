@@ -4,22 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-stream = ["dep:futures-core"]
+stream = []
 
 [dependencies]
+futures-core = { version = "0.3.30", default-features = false }
+futures-util = { version = "0.3.30", default-features = false, features = ["alloc"] }
+futures-channel = { version = "0.3.30", default-features = false, features = ["alloc"] }
 pin-project-lite = "0.2.13"
-
-futures-core = { version = "0.3.30", optional = true }
-
-[dependencies.futures-util]
-version = "0.3.30"
-default-features = false
-features = ["alloc"]
-
-[dependencies.futures-channel]
-version = "0.3.30"
-default-features = false
-features = ["alloc"]
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["rt", "macros", "time", "sync"] }

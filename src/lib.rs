@@ -3,6 +3,8 @@
 //! This crate allows you to write futures that use `spawn` but also borrow data
 //! from the current function. It does this by running those futures in a local
 //! executor within the current task.
+//! 
+//! ---
 //!
 //! To do this, declare a new scope using the [`scope!`] macro
 //! ```
@@ -18,14 +20,34 @@
 //! # }
 //! ```
 //!
-//! The scope future will not resolve until all spawned tasks have either
-//! completed or been cancelled.
+//! The spawned scope will be handed a [`ScopeHandle`] which can be used to
+//! spawn further tasks onto the scope. All spawned tasks can borrow from the
+//! surrounding scope and by default the scope will wait for all spawned tasks
+//! to complete before it resolves.
 //!
 //! # Scope Cancellation
 //! The scope created by [`scope!`] is just a regular future. Dropping it
 //! before it has completed will drop all the tasks spawned within. Within a
 //! scope, you can cancel individual spawned tasks by calling
 //! [`JoinHandle::abort`].
+//!
+//! # Handling Panics
+//! If any of the spawned tasks panicked then the task will panic once all
+//! spawned tasks have been polled to completion (we count a task that panicked
+//! as having completed for this purpose).
+//!
+//! If you would like to handle panics from spawned tasks, join them by awaiting
+//! on the [`JoinHandle`] returned by [`spawn`](crate::ScopeHandle::spawn)
+//! within the scope.
+//!
+//! The payload of the resulting panic is guaranteed to be
+//! - the payload of the main task, if it panicked, otherwise,
+//! - one of the panics emitted by the spawned tasks. Which one, specifically,
+//!   is left unspecified.
+//!
+//! # Features
+//! - `stream` - Enables the `stream` module and the `ScopedStreamExt`
+//!   extension trait.
 
 /// Helper macro used to silence `unused_import` warnings when an item is
 /// only imported in order to refer to it within a doc comment.
@@ -54,6 +76,10 @@ mod executor;
 mod scope;
 mod util;
 mod wrapper;
+
+#[cfg(doc)]
+#[doc = include_str!("../README.md")]
+mod readme {}
 
 use std::future::Future;
 use std::pin::Pin;
@@ -182,6 +208,7 @@ pub mod exports {
 /// A collection of tasks that are run together.
 ///
 /// This type is returned by the [`scope!`] macro.
+#[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct AsyncScope<'env, T> {
     /// The `'env` lifetime here is a lie. `executor` is self-referential.
     executor: Arc<ScopeExecutor<'env>>,
@@ -227,9 +254,9 @@ impl<'env, T> AsyncScope<'env, T> {
     /// Configure whether remaining tasks should be polled to completion after
     /// the main scope task exits or just dropped.
     ///
-    /// By default, whatever tasks are left in the [`AsyncScope`] continue to
-    /// run until all tasks within have been polled to completion. This matches
-    /// the existing behaviour of [`std::thread::scope`].
+    /// By default, `AsyncScope` remains in a pending state until all tasks
+    /// within have been polled to completion. This matches the existing
+    /// behaviour of [`std::thread::scope`].
     ///
     /// Setting this to `true` means that once the initial scope task (i.e. the
     /// one passed in to [`scope!`]) completes then all other tasks will be
