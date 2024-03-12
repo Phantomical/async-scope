@@ -101,7 +101,7 @@ use crate::wrapper::{TaskAbortHandle, WrapFuture};
 /// cancelled at the end of the scope.
 ///
 /// All tasks that have not been manually joined will be automatically joined
-/// before the [`AsyncScope`] completes.
+/// before the [`Scope`] completes.
 ///
 /// # Example
 /// ```
@@ -196,12 +196,12 @@ pub mod exports {
         Box::pin(future)
     }
 
-    pub fn new_scope_unchecked<'env, F, T>(func: F) -> crate::AsyncScope<'env, T>
+    pub fn new_scope_unchecked<'env, F, T>(func: F) -> crate::Scope<'env, T>
     where
         F: for<'scope> FnOnce(ScopeHandle<'scope, 'env>) -> FutureObj<'scope, T>,
         T: Send + 'env,
     {
-        crate::AsyncScope::new(func)
+        crate::Scope::new(func)
     }
 }
 
@@ -209,7 +209,7 @@ pub mod exports {
 ///
 /// This type is returned by the [`scope!`] macro.
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct AsyncScope<'env, T> {
+pub struct Scope<'env, T> {
     /// The `'env` lifetime here is a lie. `executor` is self-referential.
     executor: Arc<ScopeExecutor<'env>>,
 
@@ -219,7 +219,7 @@ pub struct AsyncScope<'env, T> {
     cancel_remaining_tasks_on_exit: bool,
 }
 
-impl<'env, T> AsyncScope<'env, T> {
+impl<'env, T> Scope<'env, T> {
     /// Create a new `AsyncScope` from a function that takes a [`ScopeHandle`]
     /// and returns a future.
     ///
@@ -266,7 +266,7 @@ impl<'env, T> AsyncScope<'env, T> {
     }
 }
 
-impl<'env, R> Future for AsyncScope<'env, R> {
+impl<'env, R> Future for Scope<'env, R> {
     type Output = R;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -289,7 +289,7 @@ impl<'env, R> Future for AsyncScope<'env, R> {
     }
 }
 
-impl<'env, T> Drop for AsyncScope<'env, T> {
+impl<'env, T> Drop for Scope<'env, T> {
     fn drop(&mut self) {
         // The futures within the executor may have ScopeHandle references. We need to
         // drop them before the executor itself is dropped.

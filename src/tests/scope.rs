@@ -13,8 +13,8 @@ fn assert_sync<T: Sync>() {}
 
 #[test]
 fn require_send_sync() {
-    assert_send::<crate::AsyncScope<()>>();
-    assert_sync::<crate::AsyncScope<()>>();
+    assert_send::<crate::Scope<()>>();
+    assert_sync::<crate::Scope<()>>();
 }
 
 /// This test ensures that the spawned tests are actually run in parallel.

@@ -22,5 +22,5 @@ const fn require_send<T: Send>() {}
 const _: () = {
     require_send::<crate::JoinHandle<()>>();
     require_send::<crate::AbortHandle>();
-    require_send::<crate::AsyncScope<()>>();
+    require_send::<crate::Scope<()>>();
 };
