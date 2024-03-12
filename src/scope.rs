@@ -6,9 +6,9 @@ use crate::error::Payload;
 use crate::executor::Executor;
 use crate::util::variance::{Covariant, Invariant};
 use crate::wrapper::WrapFuture;
-use crate::{scope, AsyncScope, FutureObj, JoinHandle};
+use crate::{scope, FutureObj, JoinHandle, Scope};
 
-used_in_docs!(AsyncScope, scope);
+used_in_docs!(Scope, scope);
 
 pub(crate) struct ScopeExecutor<'env> {
     executor: Executor<FutureObj<'env, ()>>,
@@ -81,7 +81,7 @@ impl<'env> ScopeExecutor<'env> {
     }
 }
 
-/// A handle to an [`AsyncScope`] that allows spawning scoped tasks on it.
+/// A handle to an [`Scope`] that allows spawning scoped tasks on it.
 ///
 /// This is provided to the closure passed to the [`scope!`] macro.
 ///
@@ -161,10 +161,9 @@ impl<'scope, 'env: 'scope> ScopeHandle<'scope, 'env> {
     ///
     /// If the join handle is dropped then the spawned task will be implicitly
     /// joined at the end of the scope. In that case, the scope will panic after
-    /// all tasks have been joined. If
-    /// [`AsyncScope::cancel_remaining_tasks_on_exit`] has been set to `true`,
-    /// then the scope will not join tasks but will still panic after all tasks
-    /// are canceled.
+    /// all tasks have been joined. If [`Scope::cancel_remaining_tasks_on_exit`]
+    /// has been set to `true`, then the scope will not join tasks but will
+    /// still panic after all tasks are canceled.
     ///
     /// If the [`JoinHandle`] outlives the scope and is then dropped, then the
     /// panic will be lost.

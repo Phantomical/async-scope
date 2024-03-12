@@ -44,9 +44,9 @@ use std::future::Future;
 
 use futures_core::Stream;
 
-use crate::{AsyncScope, ScopeHandle};
+use crate::{Scope, ScopeHandle};
 
-used_in_docs!(AsyncScope);
+used_in_docs!(Scope);
 
 mod buffer_unordered;
 mod buffered;
@@ -115,7 +115,7 @@ pub trait ScopedStreamExt: Stream {
     ///
     /// If a task panics but the stream is dropped before its output would have
     /// been returned then that will count as an unhandled panic to the outer
-    /// [`AsyncScope`] and it will panic on scope exit.
+    /// [`Scope`] and it will panic on scope exit.
     fn scope_buffered<'scope, 'env>(
         self,
         n: usize,
@@ -148,7 +148,7 @@ pub trait ScopedStreamExt: Stream {
     ///
     /// If a task panics but the stream is dropped before its output would have
     /// been returned then that will count as an unhandled panic to the outer
-    /// [`AsyncScope`] and it will panic on scope exit.
+    /// [`Scope`] and it will panic on scope exit.
     ///
     /// # Examples
     /// ```
@@ -205,7 +205,7 @@ pub trait ScopedStreamExt: Stream {
     /// If the spawned stream task panics then that panic will be raised here
     /// once all buffered items have been produced. If the stream is dropped
     /// before the panic is thrown then that will count as an unhandled panic
-    /// and the parent [`AsyncScope`] will panic once the main task exits.
+    /// and the parent [`Scope`] will panic once the main task exits.
     ///
     /// [0]: ScopedStreamExt::scope_buffered
     /// [1]: ScopedStreamExt::scope_buffer_unordered
